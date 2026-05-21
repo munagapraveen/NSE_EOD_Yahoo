@@ -1,0 +1,7 @@
+*.xlsx
+*.pyc
+*.db
+*.db-shm
+*.db-wal
+*.csv
+*.log
