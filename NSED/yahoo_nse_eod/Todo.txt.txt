@@ -1,0 +1,100 @@
+Got this error
+Traceback (most recent call last):
+  File "C:\Users\mohan\AppData\Local\Programs\Python\Python313\Lib\site-packages\pandas\core\indexes\base.py", line 3641, in get_loc
+    return self._engine.get_loc(casted_key)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
+  File "pandas/_libs/index.pyx", line 168, in pandas._libs.index.IndexEngine.get_loc
+  File "pandas/_libs/index.pyx", line 197, in pandas._libs.index.IndexEngine.get_loc
+  File "pandas/_libs/hashtable_class_helper.pxi", line 7668, in pandas._libs.hashtable.PyObjectHashTable.get_item
+  File "pandas/_libs/hashtable_class_helper.pxi", line 7676, in pandas._libs.hashtable.PyObjectHashTable.get_item
+KeyError: 'shares_outstanding'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "D:\Praveen\Codex\NSED\yahoo_nse_eod\download_eod.py", line 324, in <module>
+    main()
+    ~~~~^^
+  File "D:\Praveen\Codex\NSED\yahoo_nse_eod\download_eod.py", line 313, in main
+    run_eod_download(
+    ~~~~~~~~~~~~~~~~^
+        symbols,
+        ^^^^^^^^
+    ...<4 lines>...
+        single_retry_sleep_secs=options["single_retry_sleep_secs"],
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "D:\Praveen\Codex\NSED\yahoo_nse_eod\download_eod.py", line 286, in run_eod_download
+    persisted = persist_history(history, bootstrap=bootstrap)
+  File "D:\Praveen\Codex\NSED\yahoo_nse_eod\download_eod.py", line 129, in persist_history
+    refresh_latest_rows(touched_dates)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "D:\Praveen\Codex\NSED\yahoo_nse_eod\adjust_splits.py", line 185, in refresh_latest_rows
+    adjusted = attach_market_cap(adjusted, shares)
+  File "D:\Praveen\Codex\NSED\yahoo_nse_eod\adjust_splits.py", line 94, in attach_market_cap
+    merged["shares_outstanding"] = merged["shares_outstanding"].fillna(
+                                   ~~~~~~^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\mohan\AppData\Local\Programs\Python\Python313\Lib\site-packages\pandas\core\frame.py", line 4378, in __getitem__
+    indexer = self.columns.get_loc(key)
+  File "C:\Users\mohan\AppData\Local\Programs\Python\Python313\Lib\site-packages\pandas\core\indexes\base.py", line 3648, in get_loc
+    raise KeyError(key) from err
+KeyError: 'shares_outstanding'
+
+Failed: Daily Price Refresh (exit code 1)
+
+----
+Do we required Sync NSE Symbols separately?
+-----
+Error on Initial download:
+========================================================================
+Starting: Bootstrap Yahoo EOD
+========================================================================
+20:59:20  INFO      __main__  Batch 1: downloading 75 symbols from 2021-01-01 to 2026-05-21
+Traceback (most recent call last):
+  File "D:\Praveen\Codex\NSED\yahoo_nse_eod\download_eod.py", line 324, in <module>
+    main()
+    ~~~~^^
+  File "D:\Praveen\Codex\NSED\yahoo_nse_eod\download_eod.py", line 313, in main
+    run_eod_download(
+    ~~~~~~~~~~~~~~~~^
+        symbols,
+        ^^^^^^^^
+    ...<4 lines>...
+        single_retry_sleep_secs=options["single_retry_sleep_secs"],
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "D:\Praveen\Codex\NSED\yahoo_nse_eod\download_eod.py", line 286, in run_eod_download
+    persisted = persist_history(history, bootstrap=bootstrap)
+  File "D:\Praveen\Codex\NSED\yahoo_nse_eod\download_eod.py", line 127, in persist_history
+    rebuild_symbols(touched_symbols)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "D:\Praveen\Codex\NSED\yahoo_nse_eod\adjust_splits.py", line 165, in rebuild_symbols
+    replace_adjusted_prices(conn, symbol, adjusted)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Praveen\Codex\NSED\yahoo_nse_eod\db.py", line 270, in replace_adjusted_prices
+    upsert_adjusted_prices(conn, df)
+    ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^
+  File "D:\Praveen\Codex\NSED\yahoo_nse_eod\db.py", line 283, in upsert_adjusted_prices
+    conn.executemany(
+    ~~~~~~~~~~~~~~~~^
+        """
+        ^^^
+    ...<22 lines>...
+        df[cols].itertuples(index=False, name=None),
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+sqlite3.ProgrammingError: Error binding parameter 9: type 'NAType' is not supported
+
+Failed: Bootstrap Yahoo EOD (exit code 1)
+
+-----
+Many Tooltips are not hiding on focus out
+
+----
+U gave two buttons for Sync NSE Symbols & Daily Price Refersh. Didn't Sync NSE Symbols must be run automatically before Daily Price Refersh logically?
+-----
+Lets have Seperate table to store MA data. Name it 'indicators'. Update Fresh Download/Update Fetch/Corporate action adjustment to update MA's in 'indicators' table. Create a temp file to move existing MA data to indicators table
+------

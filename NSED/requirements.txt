@@ -1,0 +1,15 @@
+# Zerodha NSE Data Manager — Python dependencies
+# Install all with: pip install -r requirements.txt
+
+kiteconnect    # Zerodha Kite Connect API
+pandas         # Data manipulation and CSV/SQLite I/O
+tqdm           # Progress bars
+requests       # NSE corporate actions HTTP fetch
+yfinance       # Shares outstanding and fundamentals
+
+# tkinter — built into Python, no install needed (used by gui.py)
+openpyxl       # Excel file creation and formatting
+
+# Change Py Env if didn't run
+# Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+# .\.venv\Scripts\Activate.ps1

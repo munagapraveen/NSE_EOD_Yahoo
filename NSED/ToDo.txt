@@ -1,0 +1,29 @@
+[20:53:58]   Filters : MCAP > Rs.1,000 Cr  |  Annual ROC >= 6.5%  |  Median Turnover >= Rs.1.0 Cr
+[20:53:58] Traceback (most recent call last):
+[20:53:58]   File "D:\Praveen\Codex\NSED\sharpe_screener.py", line 1117, in <module>
+[20:53:58]     main()
+[20:53:58]     ~~~~^^
+[20:53:58]   File "D:\Praveen\Codex\NSED\sharpe_screener.py", line 1109, in main
+[20:53:58]     print_results(result, top_n=top_n,
+[20:53:58]     ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+[20:53:58]                   roc_filter=roc_filter,
+[20:53:58]                   ^^^^^^^^^^^^^^^^^^^^^^
+[20:53:58]                   turnover_filter=turnover_filter)
+[20:53:58]                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[20:53:58]   File "D:\Praveen\Codex\NSED\sharpe_screener.py", line 1029, in print_results
+[20:53:58]     print(f"  Windows : Sharpe {long_months}M and {short_months}M")
+[20:53:58]                                 ^^^^^^^^^^^
+[20:53:58] NameError: name 'long_months' is not defined
+[20:53:58] Task failed (exit code 1)
+
+
+How are we tackling Stock symbol name changes?
+(codex implemented auto name updates based on ISIN - Test it)
+
+
+
+
+
+
+
+
