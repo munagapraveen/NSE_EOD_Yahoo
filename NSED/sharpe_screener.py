@@ -38,7 +38,12 @@ from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-from db import get_connection, setup_schema
+from db import (
+    get_connection,
+    load_indicator_snapshot,
+    setup_schema,
+    upsert_indicator_rows,
+)
 from logger import get_logger
 
 log = get_logger(__name__)
@@ -115,17 +120,22 @@ def load_mcap_snapshot(conn, as_of_date=None):
             e.isin,
             f.sector,
             f.industry,
-            f.shares_outstanding,
-            e.close
+            m.shares_outstanding,
+            m.market_cap_cr,
+            e.close,
+            i.ma_20 AS dma_20,
+            i.ma_50 AS dma_50,
+            i.ma_100 AS dma_100,
+            i.ma_200 AS dma_200
         FROM eod_data e
+        LEFT JOIN marketcap m
+            ON e.symbol = m.symbol AND e.date = m.date
         LEFT JOIN fundamentals f ON e.symbol = f.symbol
+        LEFT JOIN indicators i
+            ON e.symbol = i.symbol AND e.date = i.date
         WHERE e.date = ?
           AND e.close > 0
     """, conn, params=[snapshot_date])
-
-    df["market_cap_cr"] = (
-        df["close"] * df["shares_outstanding"] / 1e7
-    ).round(2)
 
     log.info(
         f"  Snapshot loaded : {len(df):,} symbols  "
@@ -421,14 +431,8 @@ def compute_sharpe_vectorised(prices_df, symbols, long_months=6, short_months=3)
             p_6m  = prices[-(long_days + 1)]
             roc_6 = round((prices[-1] - p_6m) / p_6m * 100, 2) if p_6m > 0 else None
 
-        # -- DMAs (simple moving averages) --
-        close_today = prices[-1]
-        dma_20  = round(float(np.mean(prices[-DMA_20:])),  2) if len(prices) >= DMA_20  else None
-        dma_50  = round(float(np.mean(prices[-DMA_50:])),  2) if len(prices) >= DMA_50  else None
-        dma_100 = round(float(np.mean(prices[-DMA_100:])), 2) if len(prices) >= DMA_100 else None
-        dma_200 = round(float(np.mean(prices[-DMA_200:])), 2) if len(prices) >= DMA_200 else None
-
         # -- Away from 52W High (negative value = below peak) --
+        close_today = prices[-1]
         away_52wh = None
         if week_52_high and week_52_high > 0:
             away_52wh = round((close_today - week_52_high) / week_52_high * 100, 2)
@@ -441,10 +445,6 @@ def compute_sharpe_vectorised(prices_df, symbols, long_months=6, short_months=3)
             "ROC_3":        roc_3,
             "week_52_high": week_52_high,
             "away_52wh":    away_52wh,
-            "dma_20":       dma_20,
-            "dma_50":       dma_50,
-            "dma_100":      dma_100,
-            "dma_200":      dma_200,
         })
 
     log.info(
@@ -453,6 +453,28 @@ def compute_sharpe_vectorised(prices_df, symbols, long_months=6, short_months=3)
         f"({time.time() - t0:.1f}s)"
     )
     return pd.DataFrame(results)
+
+
+def compute_snapshot_indicators(prices_df, snapshot_date):
+    """Compute and persist MA rows for one snapshot date."""
+    records = []
+    subset = prices_df[prices_df["date"] <= snapshot_date].copy()
+    grouped = subset.groupby("symbol")["close"]
+
+    for symbol, closes in grouped:
+        prices = closes.values.astype(float)
+        records.append({
+            "symbol": symbol,
+            "date": snapshot_date,
+            "ma_5": round(float(np.mean(prices[-5:])), 2) if len(prices) >= 5 else None,
+            "ma_10": round(float(np.mean(prices[-10:])), 2) if len(prices) >= 10 else None,
+            "ma_20": round(float(np.mean(prices[-DMA_20:])), 2) if len(prices) >= DMA_20 else None,
+            "ma_50": round(float(np.mean(prices[-DMA_50:])), 2) if len(prices) >= DMA_50 else None,
+            "ma_100": round(float(np.mean(prices[-DMA_100:])), 2) if len(prices) >= DMA_100 else None,
+            "ma_200": round(float(np.mean(prices[-DMA_200:])), 2) if len(prices) >= DMA_200 else None,
+        })
+
+    return pd.DataFrame(records)
 
 
 # ===========================================================================
@@ -621,6 +643,20 @@ def run_screener(
         log.warning("No price history found.")
         return pd.DataFrame(), None
 
+    indicator_calc_df = compute_snapshot_indicators(prices_df, latest_date)
+    indicator_df = pd.DataFrame(columns=["symbol", "dma_20", "dma_50", "dma_100", "dma_200"])
+    if not indicator_calc_df.empty:
+        with get_connection() as conn:
+            upsert_indicator_rows(conn, indicator_calc_df.to_dict("records"))
+            indicator_snapshot = load_indicator_snapshot(conn, latest_date)
+        if not indicator_snapshot.empty:
+            indicator_df = indicator_snapshot.rename(columns={
+                "ma_20": "dma_20",
+                "ma_50": "dma_50",
+                "ma_100": "dma_100",
+                "ma_200": "dma_200",
+            })[["symbol", "dma_20", "dma_50", "dma_100", "dma_200"]]
+
     # Step 4 -- Annual ROC filter
     roc_df = compute_and_filter_roc(prices_df, roc_filter)
     if roc_df.empty:
@@ -656,8 +692,13 @@ def run_screener(
 
     # Step 8 -- Merge all results
     log.info("Step 8 -- Merging and ranking ...")
+    snapshot_base = mcap_df.drop(
+        columns=[col for col in ["dma_20", "dma_50", "dma_100", "dma_200"] if col in mcap_df.columns],
+        errors="ignore",
+    )
     result = (
-        mcap_df
+        snapshot_base
+        .merge(indicator_df, on="symbol", how="left")
         .merge(roc_df,      on="symbol", how="inner")
         .merge(turnover_df, on="symbol", how="inner")
         .merge(sharpe_df,   on="symbol", how="inner")
@@ -670,7 +711,7 @@ def run_screener(
     log.info(f"  Pool before ranking : {len(result):,} stocks")
 
     result = rank_stocks(result)
-    result.attrs["                                                        "] = int(long_months)
+    result.attrs["long_months"] = int(long_months)
     result.attrs["short_months"] = int(short_months)
 
     output_cols = [

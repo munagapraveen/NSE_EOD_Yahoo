@@ -20,8 +20,14 @@ import sqlite3
 import pandas as pd
 
 from config import DB_FILE
+from logger import get_logger
+
+log = get_logger(__name__)
 
 MA_WINDOWS = [5, 10, 20, 50, 100, 200]
+
+def get_indicator_cols():
+    return [f"ma_{window}" for window in MA_WINDOWS]
 
 
 @contextmanager
@@ -95,19 +101,22 @@ def setup_schema(conn):
             close             REAL,
             volume            REAL,
             split_factor      REAL NOT NULL,
-            shares_outstanding REAL,
-            market_cap_cr     REAL,
-            ma_5              REAL,
-            ma_10             REAL,
-            ma_20             REAL,
-            ma_50             REAL,
-            ma_100            REAL,
-            ma_200            REAL,
             adjusted_at       TEXT DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (symbol, date)
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_adj_eod_symbol_date ON adjusted_eod_prices(symbol, date)")
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS marketcap (
+            symbol            TEXT NOT NULL,
+            date              TEXT NOT NULL,
+            market_cap_cr     REAL,
+            shares_outstanding REAL,
+            PRIMARY KEY (symbol, date)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_marketcap_symbol_date ON marketcap(symbol, date)")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS share_history (
@@ -134,6 +143,22 @@ def setup_schema(conn):
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_actions_symbol_date ON corporate_actions(symbol, ex_date)")
 
+    # Wide format indicators table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS indicators (
+            symbol            TEXT NOT NULL,
+            date              TEXT NOT NULL,
+            ma_5              REAL,
+            ma_10             REAL,
+            ma_20             REAL,
+            ma_50             REAL,
+            ma_100            REAL,
+            ma_200            REAL,
+            PRIMARY KEY (symbol, date)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_indicators_symbol_date ON indicators(symbol, date)")
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS download_runs (
             run_id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -148,13 +173,24 @@ def setup_schema(conn):
     existing_columns = {
         row[1] for row in conn.execute("PRAGMA table_info(adjusted_eod_prices)")
     }
-    for col in ["shares_outstanding", "market_cap_cr"]:
-        if col not in existing_columns:
-            conn.execute(f"ALTER TABLE adjusted_eod_prices ADD COLUMN {col} REAL")
-    for window in MA_WINDOWS:
-        col = f"ma_{window}"
-        if col not in existing_columns:
-            conn.execute(f"ALTER TABLE adjusted_eod_prices ADD COLUMN {col} REAL")
+    # Remove redundant columns from adjusted_eod_prices
+    for col in ["ma_5", "ma_10", "ma_20", "ma_50", "ma_100", "ma_200", "shares_outstanding", "market_cap_cr"]:
+        if col in existing_columns:
+            try:
+                conn.execute(f"ALTER TABLE adjusted_eod_prices DROP COLUMN {col}")
+                log.info(f"Dropped column {col} from adjusted_eod_prices")
+            except Exception as e:
+                log.warning(f"Could not drop column {col}: {e}")
+
+    # Ensure indicators table is wide
+    indicator_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(indicators)")
+    }
+    if "indicator" in indicator_cols:
+        log.info("Indicators table is in old format. Recreating...")
+        conn.execute("DROP TABLE indicators")
+        setup_schema(conn)
+        return
 
     conn.commit()
 
@@ -228,6 +264,10 @@ def insert_raw_prices(conn, df):
         "symbol", "date", "open", "high", "low", "close",
         "adj_close", "volume", "dividends", "stock_splits", "source",
     ]
+    
+    # Convert pd.NA/NaN to None for SQLite compatibility
+    clean_df = df[cols].where(pd.notnull(df[cols]), None)
+
     conn.executemany(
         """
         INSERT INTO raw_eod_prices (
@@ -246,7 +286,7 @@ def insert_raw_prices(conn, df):
             source=excluded.source,
             downloaded_at=CURRENT_TIMESTAMP
         """,
-        df[cols].itertuples(index=False, name=None),
+        clean_df.itertuples(index=False, name=None),
     )
     conn.commit()
 
@@ -277,16 +317,19 @@ def upsert_adjusted_prices(conn, df):
 
     cols = [
         "symbol", "date", "open", "high", "low", "close", "volume", "split_factor",
-        "shares_outstanding", "market_cap_cr",
-        "ma_5", "ma_10", "ma_20", "ma_50", "ma_100", "ma_200",
     ]
+    
+    # Explicitly convert to tuples and replace NAType/NaN with None
+    data = [
+        tuple(None if pd.isna(v) else v for v in row)
+        for row in df[cols].itertuples(index=False, name=None)
+    ]
+
     conn.executemany(
         """
         INSERT INTO adjusted_eod_prices (
-            symbol, date, open, high, low, close, volume, split_factor,
-            shares_outstanding, market_cap_cr,
-            ma_5, ma_10, ma_20, ma_50, ma_100, ma_200
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            symbol, date, open, high, low, close, volume, split_factor
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(symbol, date) DO UPDATE SET
             open=excluded.open,
             high=excluded.high,
@@ -294,19 +337,96 @@ def upsert_adjusted_prices(conn, df):
             close=excluded.close,
             volume=excluded.volume,
             split_factor=excluded.split_factor,
-            shares_outstanding=excluded.shares_outstanding,
-            market_cap_cr=excluded.market_cap_cr,
-            ma_5=excluded.ma_5,
-            ma_10=excluded.ma_10,
-            ma_20=excluded.ma_20,
-            ma_50=excluded.ma_50,
-            ma_100=excluded.ma_100,
-            ma_200=excluded.ma_200,
             adjusted_at=CURRENT_TIMESTAMP
         """,
-        df[cols].itertuples(index=False, name=None),
+        data,
     )
     conn.commit()
+
+
+def save_market_caps(conn, df):
+    """
+    Saves market_cap_cr and shares_outstanding into the marketcap table.
+    """
+    if df.empty:
+        return
+    
+    cols = ["symbol", "date", "market_cap_cr", "shares_outstanding"]
+    if not all(c in df.columns for c in cols):
+        return
+
+    data = [
+        tuple(None if pd.isna(v) else v for v in row)
+        for row in df[cols].itertuples(index=False, name=None)
+    ]
+    
+    conn.executemany(
+        """
+        INSERT INTO marketcap (symbol, date, market_cap_cr, shares_outstanding)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(symbol, date) DO UPDATE SET
+            market_cap_cr=excluded.market_cap_cr,
+            shares_outstanding=excluded.shares_outstanding
+        """,
+        data,
+    )
+    conn.commit()
+
+
+def save_indicators(conn, df):
+    """
+    Saves all indicator columns from the given dataframe into the indicators table.
+    """
+    if df.empty:
+        return
+    
+    # Identify available indicator columns (ma_*)
+    indicator_cols = [c for c in df.columns if c.startswith("ma_")]
+    cols = ["symbol", "date"] + indicator_cols
+    
+    data = [
+        tuple(None if pd.isna(v) else v for v in row)
+        for row in df[cols].itertuples(index=False, name=None)
+    ]
+    
+    col_placeholders = ",".join(["?"] * len(cols))
+    col_names = ",".join(cols)
+    update_clause = ",".join([f"{c}=excluded.{c}" for c in indicator_cols])
+    
+    conn.executemany(
+        f"""
+        INSERT INTO indicators ({col_names})
+        VALUES ({col_placeholders})
+        ON CONFLICT(symbol, date) DO UPDATE SET
+            {update_clause}
+        """,
+        data,
+    )
+    conn.commit()
+
+
+def upsert_indicators(conn, df):
+    """
+    Legacy/Alternative upsert for wide indicator dataframes.
+    """
+    save_indicators(conn, df)
+
+
+def load_indicators(conn, symbol, indicator_names=None):
+    """
+    Returns wide format by default now.
+    """
+    cols = ["date"]
+    if indicator_names:
+        cols.extend(indicator_names)
+    else:
+        # Load all ma_* columns
+        info = conn.execute("PRAGMA table_info(indicators)").fetchall()
+        cols.extend([row[1] for row in info if row[1].startswith("ma_")])
+        
+    col_str = ",".join(cols)
+    query = f"SELECT {col_str} FROM indicators WHERE symbol = ? ORDER BY date"
+    return pd.read_sql(query, conn, params=[symbol])
 
 
 def load_raw_prices(conn, symbol):
@@ -320,11 +440,8 @@ def load_raw_prices(conn, symbol):
 
 def upsert_share_history(conn, records):
     conn.executemany("""
-        INSERT INTO share_history (
-            symbol, date, shares_outstanding, source
-        ) VALUES (
-            :symbol, :date, :shares_outstanding, :source
-        )
+        INSERT INTO share_history (symbol, date, shares_outstanding, source)
+        VALUES (:symbol, :date, :shares_outstanding, :source)
         ON CONFLICT(symbol, date) DO UPDATE SET
             shares_outstanding=excluded.shares_outstanding,
             source=excluded.source,
@@ -345,7 +462,7 @@ def load_share_history(conn, symbol):
 def load_adjusted_market_caps(conn, symbol):
     return pd.read_sql("""
         SELECT symbol, date, market_cap_cr, shares_outstanding
-        FROM adjusted_eod_prices
+        FROM marketcap
         WHERE symbol = ?
         ORDER BY date
     """, conn, params=[symbol])
@@ -375,7 +492,13 @@ def upsert_symbol_aliases(conn, records):
 
 
 def apply_symbol_rename(conn, old_symbol, new_symbol, effective_date=None, source="nse", note=""):
-    for table in ["raw_eod_prices", "adjusted_eod_prices", "share_history"]:
+    for table in [
+        "raw_eod_prices",
+        "adjusted_eod_prices",
+        "share_history",
+        "marketcap",
+        "indicators",
+    ]:
         existing_dates = {
             row[0] for row in conn.execute(
                 f"SELECT date FROM {table} WHERE symbol = ?",

@@ -83,6 +83,47 @@ def setup_schema(conn):
     """)
 
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS symbols_master (
+            symbol          TEXT PRIMARY KEY,
+            company_name    TEXT,
+            isin            TEXT,
+            category        TEXT,
+            series          TEXT,
+            active          INTEGER DEFAULT 1,
+            source          TEXT,
+            last_synced_on  TEXT
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_symbols_master_category ON symbols_master (category)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_symbols_master_active ON symbols_master (active)")
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS marketcap (
+            symbol              TEXT NOT NULL,
+            date                TEXT NOT NULL,
+            market_cap_cr       REAL,
+            shares_outstanding  INTEGER,
+            PRIMARY KEY (symbol, date)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_marketcap_symbol_date ON marketcap (symbol, date)")
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS indicators (
+            symbol    TEXT NOT NULL,
+            date      TEXT NOT NULL,
+            ma_5      REAL,
+            ma_10     REAL,
+            ma_20     REAL,
+            ma_50     REAL,
+            ma_100    REAL,
+            ma_200    REAL,
+            PRIMARY KEY (symbol, date)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_indicators_symbol_date ON indicators (symbol, date)")
+
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS corporate_actions (
             symbol       TEXT,
             action_type  TEXT,
@@ -170,6 +211,8 @@ def insert_eod_rows(conn, df):
 def delete_symbol_data(conn, symbol):
     """Deletes all rows for a symbol. Returns number of rows deleted."""
     cur = conn.execute("DELETE FROM eod_data WHERE symbol = ?", (symbol,))
+    conn.execute("DELETE FROM marketcap WHERE symbol = ?", (symbol,))
+    conn.execute("DELETE FROM indicators WHERE symbol = ?", (symbol,))
     conn.commit()
     return cur.rowcount
 
@@ -187,6 +230,58 @@ def get_all_symbols(conn):
     """Returns set of all symbols currently in eod_data."""
     cur = conn.execute("SELECT DISTINCT symbol FROM eod_data")
     return {row[0] for row in cur.fetchall()}
+
+
+def load_symbols_master(conn):
+    """Returns the stored NSE master universe."""
+    return pd.read_sql("""
+        SELECT symbol, company_name, isin, category, series, active, source, last_synced_on
+        FROM symbols_master
+        ORDER BY symbol
+    """, conn)
+
+
+def upsert_symbols_master(conn, records):
+    """Insert or replace NSE master symbols."""
+    if not records:
+        return
+    conn.executemany("""
+        INSERT OR REPLACE INTO symbols_master VALUES (
+            :symbol, :company_name, :isin, :category,
+            :series, :active, :source, :last_synced_on
+        )
+    """, records)
+    conn.commit()
+
+
+def mark_missing_master_symbols_inactive(conn, active_symbols):
+    """Mark symbols not present in the latest NSE master as inactive."""
+    placeholders = ",".join("?" for _ in active_symbols) or "''"
+    conn.execute(
+        f"""
+        UPDATE symbols_master
+        SET active = 0
+        WHERE symbol NOT IN ({placeholders})
+        """,
+        tuple(active_symbols),
+    )
+    conn.commit()
+
+
+def get_active_master_symbols(conn, categories=None):
+    """Return active NSE master symbols, optionally filtered by category."""
+    params = []
+    where = ["active = 1"]
+    if categories:
+        placeholders = ",".join("?" for _ in categories)
+        where.append(f"category IN ({placeholders})")
+        params.extend(categories)
+    return pd.read_sql(f"""
+        SELECT symbol, company_name, isin, category, series
+        FROM symbols_master
+        WHERE {' AND '.join(where)}
+        ORDER BY symbol
+    """, conn, params=params)
 
 
 def get_db_stats(db_file=DB_FILE):
@@ -232,6 +327,38 @@ def upsert_fundamentals(conn, records):
         )
     """, records)
     conn.commit()
+
+
+def upsert_marketcap_rows(conn, records):
+    """Insert or replace daily market-cap rows (list of dicts)."""
+    if not records:
+        return
+    conn.executemany("""
+        INSERT OR REPLACE INTO marketcap VALUES (
+            :symbol, :date, :market_cap_cr, :shares_outstanding
+        )
+    """, records)
+    conn.commit()
+
+
+def upsert_indicator_rows(conn, records):
+    """Insert or replace moving-average rows (list of dicts)."""
+    if not records:
+        return
+    conn.executemany("""
+        INSERT OR REPLACE INTO indicators VALUES (
+            :symbol, :date, :ma_5, :ma_10, :ma_20, :ma_50, :ma_100, :ma_200
+        )
+    """, records)
+    conn.commit()
+
+
+def load_indicator_snapshot(conn, date):
+    return pd.read_sql("""
+        SELECT symbol, date, ma_5, ma_10, ma_20, ma_50, ma_100, ma_200
+        FROM indicators
+        WHERE date = ?
+    """, conn, params=[date])
 
 
 # ===========================================================================
@@ -283,30 +410,38 @@ def rename_symbol(conn, old_symbol, new_symbol):
     Skips dates already existing under new_symbol.
     Returns number of rows moved.
     """
-    existing = {
-        row[0] for row in conn.execute(
-            "SELECT date FROM eod_data WHERE symbol=?", (new_symbol,)
-        )
-    }
-    cur  = conn.execute("SELECT * FROM eod_data WHERE symbol=?", (old_symbol,))
-    cols = [d[0] for d in cur.description]
-    rows = cur.fetchall()
+    moved_rows = 0
+    for table in ["eod_data", "marketcap", "indicators"]:
+        existing = {
+            row[0] for row in conn.execute(
+                f"SELECT date FROM {table} WHERE symbol=?", (new_symbol,)
+            )
+        }
+        cur = conn.execute(f"SELECT * FROM {table} WHERE symbol=?", (old_symbol,))
+        cols = [d[0] for d in cur.description]
+        rows = cur.fetchall()
 
-    sym_idx  = cols.index("symbol")
-    date_idx = cols.index("date")
-    to_move  = [r for r in rows if r[date_idx] not in existing]
+        sym_idx = cols.index("symbol")
+        date_idx = cols.index("date")
+        to_move = [r for r in rows if r[date_idx] not in existing]
 
-    if to_move:
-        ph = ",".join(["?"] * len(cols))
-        for row in to_move:
-            r = list(row)
-            r[sym_idx] = new_symbol
-            conn.execute(f"INSERT OR IGNORE INTO eod_data VALUES ({ph})", r)
-        conn.execute("DELETE FROM eod_data WHERE symbol=?", (old_symbol,))
-        conn.commit()
+        if to_move:
+            ph = ",".join(["?"] * len(cols))
+            for row in to_move:
+                r = list(row)
+                r[sym_idx] = new_symbol
+                conn.execute(f"INSERT OR IGNORE INTO {table} VALUES ({ph})", r)
+            if table == "eod_data":
+                moved_rows = len(to_move)
+
+        # Always remove the old symbol rows once the surviving dates were copied
+        # or intentionally skipped due to existing collisions under new_symbol.
+        conn.execute(f"DELETE FROM {table} WHERE symbol=?", (old_symbol,))
+
+    conn.commit()
 
     log_symbol_change(conn, old_symbol, new_symbol)
-    return len(to_move)
+    return moved_rows
 
 
 # ===========================================================================

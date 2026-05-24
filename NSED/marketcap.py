@@ -30,7 +30,12 @@ import logging
 import pandas as pd
 import yfinance as yf
 
-from db import get_connection, setup_schema, upsert_fundamentals
+from analytics_store import rebuild_marketcap_for_symbols
+from db import (
+    get_connection,
+    setup_schema,
+    upsert_fundamentals,
+)
 from logger import get_logger
 
 log = get_logger(__name__)
@@ -311,6 +316,10 @@ def fetch_selected(conn, opts):
     log.info(f"  Time    : {mins}m {secs}s")
     log.info("=" * 55)
 
+    rows = rebuild_marketcap_for_symbols(symbols if not opts["bootstrap"] else None)
+    if rows:
+        log.info(f"Persisted marketcap rows: {rows:,}")
+
 
 def get_daily_marketcap(conn, symbol=None, date=None):
     """
@@ -330,13 +339,13 @@ def get_daily_marketcap(conn, symbol=None, date=None):
 
     return pd.read_sql(f"""
         SELECT
-            e.symbol, f.sector, e.date, e.close,
-            f.shares_outstanding,
-            ROUND((e.close * f.shares_outstanding) / 1e7, 2) AS market_cap_cr
-        FROM eod_data e
+            e.symbol, f.sector, m.date, e.close,
+            m.shares_outstanding, m.market_cap_cr
+        FROM marketcap m
+        JOIN eod_data e ON e.symbol = m.symbol AND e.date = m.date
         JOIN fundamentals f ON e.symbol = f.symbol
         {where_sql}
-        ORDER BY e.symbol, e.date
+        ORDER BY e.symbol, m.date
     """, conn, params=params)
 
 
@@ -345,12 +354,13 @@ def get_marketcap_ranked(conn, date):
     return pd.read_sql("""
         SELECT
             e.symbol, f.company_name, f.sector, e.close,
-            f.shares_outstanding,
-            ROUND((e.close * f.shares_outstanding) / 1e7, 2) AS market_cap_cr,
-            RANK() OVER (ORDER BY (e.close * f.shares_outstanding) DESC) AS rank
-        FROM eod_data e
+            m.shares_outstanding,
+            m.market_cap_cr,
+            RANK() OVER (ORDER BY m.market_cap_cr DESC) AS rank
+        FROM marketcap m
+        JOIN eod_data e ON e.symbol = m.symbol AND e.date = m.date
         JOIN fundamentals f ON e.symbol = f.symbol
-        WHERE e.date = ?
+        WHERE m.date = ?
         ORDER BY market_cap_cr DESC
     """, conn, params=[date])
 

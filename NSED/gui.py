@@ -219,9 +219,8 @@ class Tooltip:
     def show_tooltip(self, event=None):
         if self.tooltip_window or not self.text:
             return
-        x, y, _, _ = self.widget.bbox("insert")
-        x += self.widget.winfo_rootx() + 25
-        y += self.widget.winfo_rooty() + 25
+        x = self.widget.winfo_rootx() + 20
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
         
         # Create a borderless top-level window
         self.tooltip_window = tw = tk.Toplevel(self.widget)

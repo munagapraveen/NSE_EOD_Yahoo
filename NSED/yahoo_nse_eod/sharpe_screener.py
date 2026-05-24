@@ -66,15 +66,19 @@ def load_mcap_snapshot(conn, as_of_date=None):
             s.isin,
             s.series,
             a.close,
-            a.market_cap_cr,
-            a.shares_outstanding,
-            a.ma_20  AS dma_20,
-            a.ma_50  AS dma_50,
-            a.ma_100 AS dma_100,
-            a.ma_200 AS dma_200
+            m.market_cap_cr,
+            m.shares_outstanding,
+            i.ma_20  AS dma_20,
+            i.ma_50  AS dma_50,
+            i.ma_100 AS dma_100,
+            i.ma_200 AS dma_200
         FROM adjusted_eod_prices a
         LEFT JOIN symbols s
             ON a.symbol = s.symbol
+        LEFT JOIN indicators i
+            ON a.symbol = i.symbol AND a.date = i.date
+        LEFT JOIN marketcap m
+            ON a.symbol = m.symbol AND a.date = m.date
         WHERE a.date = ?
           AND a.close > 0
     """, conn, params=[snapshot_date])
@@ -663,10 +667,13 @@ def export_to_excel(result, latest_date):
         log.info(f"  Sheet 2 written : Filtered  ({len(filtered):,} rows)")
 
     wb.save(str(out_path))
-    log.info(f"Excel file saved : {out_path}")
+    log.info("-" * 50)
+    log.info(f"SUCCESS: Sharpe Screener output saved to Excel.")
+    log.info(f"File Path: {out_path.absolute()}")
+    log.info("-" * 50)
 
 
-def print_results(df, top_n=TOP_N, roc_filter=ROC_ANNUAL_FILTER,
+def print_results(df, roc_filter=ROC_ANNUAL_FILTER,
                   turnover_filter=TURNOVER_FILTER_CR):
     if df.empty:
         print("No results to display.")
@@ -674,7 +681,7 @@ def print_results(df, top_n=TOP_N, roc_filter=ROC_ANNUAL_FILTER,
 
     long_months = int(df.attrs.get("long_months", 6))
     short_months = int(df.attrs.get("short_months", 3))
-    display = df.head(top_n).copy()
+    display = df.copy()
     display.index = range(1, len(display) + 1)
 
     for col in ["ROC_annual", "ROC_6", "ROC_3", "away_52wh"]:
@@ -712,7 +719,7 @@ def print_results(df, top_n=TOP_N, roc_filter=ROC_ANNUAL_FILTER,
 
     print(f"\n{'=' * 100}")
     print(
-        f"  TOP {top_n} SHARPE RATIO STOCKS  |  "
+        f"  SHARPE RATIO SCREENER RESULTS  |  "
         f"Screened: {datetime.today().strftime('%d %b %Y')}"
     )
     print(f"{'=' * 100}")
@@ -724,6 +731,7 @@ def print_results(df, top_n=TOP_N, roc_filter=ROC_ANNUAL_FILTER,
         f"Median Turnover >= Rs.{turnover_filter} Cr"
     )
     print(f"  Windows : Sharpe {long_months}M and {short_months}M")
+    print(f"  Total Stocks: {len(df)}")
     print("  Formula : Sharpe = mean(daily_returns) / std(daily_returns)")
     print("  Note    : Median turnover used (not mean) to ignore block deal spikes")
     print("            sqrt(252) omitted -- ranking is identical\n")
@@ -799,7 +807,6 @@ def main():
 
     print_results(
         result,
-        top_n=top_n,
         roc_filter=roc_filter,
         turnover_filter=turnover_filter,
     )

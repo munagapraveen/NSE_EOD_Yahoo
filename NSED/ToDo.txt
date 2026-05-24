@@ -1,25 +1,35 @@
-[20:53:58]   Filters : MCAP > Rs.1,000 Cr  |  Annual ROC >= 6.5%  |  Median Turnover >= Rs.1.0 Cr
-[20:53:58] Traceback (most recent call last):
-[20:53:58]   File "D:\Praveen\Codex\NSED\sharpe_screener.py", line 1117, in <module>
-[20:53:58]     main()
-[20:53:58]     ~~~~^^
-[20:53:58]   File "D:\Praveen\Codex\NSED\sharpe_screener.py", line 1109, in main
-[20:53:58]     print_results(result, top_n=top_n,
-[20:53:58]     ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
-[20:53:58]                   roc_filter=roc_filter,
-[20:53:58]                   ^^^^^^^^^^^^^^^^^^^^^^
-[20:53:58]                   turnover_filter=turnover_filter)
-[20:53:58]                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[20:53:58]   File "D:\Praveen\Codex\NSED\sharpe_screener.py", line 1029, in print_results
-[20:53:58]     print(f"  Windows : Sharpe {long_months}M and {short_months}M")
-[20:53:58]                                 ^^^^^^^^^^^
-[20:53:58] NameError: name 'long_months' is not defined
-[20:53:58] Task failed (exit code 1)
+On First Download of data Marketcap table is empty and got this error
 
+[17:09:09] 
+[17:09:09] ==================================================
+[17:09:09]   Starting: Sharpe Screener -- Live (6M/3M)
+[17:09:09] ==================================================
+[17:09:10] 17:09:10  INFO      __main__
+[17:09:10] 17:09:10  INFO      __main__  ============================================================
+[17:09:10] 17:09:10  INFO      __main__  NSE SHARPE RATIO SCREENER
+[17:09:10] 17:09:10  INFO      __main__  ============================================================
+[17:09:10] 17:09:10  INFO      __main__    Mode            : LIVE  (latest data)
+[17:09:10] 17:09:10  INFO      __main__    MCAP filter     : > Rs.1,000 Cr
+[17:09:10] 17:09:10  INFO      __main__    Annual ROC      : >= 6.5%
+[17:09:10] 17:09:10  INFO      __main__    Median Turnover : >= Rs.1.0 Cr / day
+[17:09:10] 17:09:10  INFO      __main__    Sharpe windows  : 6M and 3M
+[17:09:10] 17:09:10  INFO      __main__    Sharpe formula  : mean(r) / std(r)  [no sqrt(252)]
+[17:09:10] 17:09:10  INFO      __main__    Price window    : last 253 trading days
+[17:09:10] 17:09:10  INFO      __main__
+[17:09:10] 17:09:10  INFO      __main__  Step 1 -- Loading MCAP snapshot (latest date) ...
+[17:09:10] 17:09:10  INFO      __main__    Snapshot loaded : 2,652 symbols  (0.1s)
+[17:09:10] 17:09:10  INFO      __main__  Step 2 -- MCAP filter > Rs.1,000 Cr : 0 symbols  (from 2,652)
+[17:09:10] 17:09:10  WARNING   __main__  No stocks passed MCAP filter.
+[17:09:10] 17:09:10  WARNING   __main__  Run marketcap.py --fetch first to populate fundamentals.
+[17:09:10] Task completed successfully.
+---------------
+Download MarketCap Only for Equity & BE. (Ignore ETF/Indexes)
+---------------
 
-How are we tackling Stock symbol name changes?
-(codex implemented auto name updates based on ISIN - Test it)
+In Zerodha project Modify the screener logic & UI as in Yahoo project
+--------------
 
+Change Start date to 01-01-2020
 
 
 

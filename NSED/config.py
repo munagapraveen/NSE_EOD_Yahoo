@@ -17,12 +17,12 @@
 # Zerodha API credentials — permanent, never change
 # ---------------------------------------------------------------------------
 API_KEY    = "8inpa3iigq3n8ox8"
-API_SECRET = "6pw13rfp2g8vtgv5jjbsp9kjkl2xubi0"
+API_SECRET = "son0in9ljs59is5858gk06tixqp9zwv9"
 
 # ---------------------------------------------------------------------------
 # Access token — refresh every trading day (expires at midnight)
 # ---------------------------------------------------------------------------
-ACCESS_TOKEN = "GY6ReiXXBf502oShXEL1cUvgB7JTf3h6"
+ACCESS_TOKEN = "UA0Dv60ctQGxZkepEgzXRcwUw7fyqjUO"
 
 # ---------------------------------------------------------------------------
 # Token generation flag
@@ -32,11 +32,14 @@ ACCESS_TOKEN = "GY6ReiXXBf502oShXEL1cUvgB7JTf3h6"
 GENERATE_TOKEN = False
 
 # ---------------------------------------------------------------------------
-# Database -- absolute path so all scripts find it regardless of where
-# they are launched from (terminal, GUI, Task Scheduler, etc.)
+# Database -- stored under data/ so project root stays tidy, while still using
+# an absolute path so all scripts find it regardless of how they are launched.
 # ---------------------------------------------------------------------------
 import os as _os
-DB_FILE = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "nse_eod.db")
+BASE_DIR = _os.path.dirname(_os.path.abspath(__file__))
+DATA_DIR = _os.path.join(BASE_DIR, "data")
+_os.makedirs(DATA_DIR, exist_ok=True)
+DB_FILE = _os.path.join(DATA_DIR, "nse_eod.db")
 
 # ---------------------------------------------------------------------------
 # Kite API settings

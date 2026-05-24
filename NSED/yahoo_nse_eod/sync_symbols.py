@@ -10,7 +10,7 @@ from nse import fetch_securities_master
 log = get_logger(__name__)
 
 
-def main():
+def run_sync():
     master = fetch_securities_master()
     today = datetime.today().strftime("%Y-%m-%d")
     records = []
@@ -37,6 +37,10 @@ def main():
         mark_missing_symbols_inactive(conn, [record["symbol"] for record in records])
 
     log.info(f"NSE symbol sync complete: {len(records):,} active EQ/BE symbols.")
+
+
+def main():
+    run_sync()
 
 
 if __name__ == "__main__":

@@ -32,7 +32,7 @@ UI can be added later.
 - [yahoo_client.py](D:/Praveen/Codex/NSED/yahoo_nse_eod/yahoo_client.py)
 - [sync_symbols.py](D:/Praveen/Codex/NSED/yahoo_nse_eod/sync_symbols.py)
 - [download_eod.py](D:/Praveen/Codex/NSED/yahoo_nse_eod/download_eod.py)
-- [download_shares.py](D:/Praveen/Codex/NSED/yahoo_nse_eod/download_shares.py)
+- [sync_share_counts.py](D:/Praveen/Codex/NSED/yahoo_nse_eod/sync_share_counts.py)
 - [corporate_actions.py](D:/Praveen/Codex/NSED/yahoo_nse_eod/corporate_actions.py)
 - [adjust_splits.py](D:/Praveen/Codex/NSED/yahoo_nse_eod/adjust_splits.py)
 - [sharpe_screener.py](D:/Praveen/Codex/NSED/yahoo_nse_eod/sharpe_screener.py)
@@ -74,8 +74,8 @@ python download_eod.py --bootstrap --batch-size 50 --retry-sleep 2
 3. Download historical shares outstanding
 
 ```powershell
-python download_shares.py
-python download_shares.py --only-missing --workers 4
+python sync_share_counts.py
+python sync_share_counts.py --only-missing --workers 4
 ```
 
 4. Build split-adjusted prices, market cap, and moving averages
@@ -145,6 +145,6 @@ python gui.py
 - Market cap is calculated on the split-adjusted basis so historical market caps stay stable when old prices are back-adjusted after a split refresh.
 - Corporate-action rebuilds preserve previously stored historical market-cap values by date, and adjust stored shares outstanding to match the refreshed adjusted close.
 - In other words: `share_history` helps create market cap for new dates, but `adjusted_eod_prices.market_cap_cr` is the authoritative historical market-cap series after insertion.
-- `download_shares.py` now uses controlled parallelism, retries failed symbols sequentially at the end, and writes unresolved failures to `data/share_download_failures_latest.csv`.
+- `sync_share_counts.py` now uses controlled parallelism, retries failed symbols sequentially at the end, and writes unresolved failures to `data/share_download_failures_latest.csv`.
 - `download_eod.py` retries failed Yahoo batches with backoff, then falls back to one-symbol-at-a-time recovery for stubborn/rate-limited batches, and writes unresolved failures to `data/eod_download_failures_latest.csv`.
 - Dividend-adjusted total-return series can be added later if needed.

@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import requests
 
+from analytics_store import rebuild_analytics_for_symbols
 from config import DEFAULT_DAYS_FIRST_RUN, YEARS_BACK
 from db import (
     get_connection,
@@ -255,6 +256,9 @@ def main():
             progress_label="Corporate Actions Refresh",
         )
         results["fail"] += lookup_fail
+
+        if tasks:
+            rebuild_analytics_for_symbols([task["symbol"] for task in tasks])
 
         save_run_date(conn, "corporate_actions", "success")
 

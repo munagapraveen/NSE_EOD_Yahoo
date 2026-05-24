@@ -12,6 +12,8 @@ from db import (
     load_raw_prices,
     load_share_history,
     replace_adjusted_prices,
+    save_indicators,
+    save_market_caps,
     setup_schema,
     upsert_adjusted_prices,
 )
@@ -42,12 +44,18 @@ def build_split_adjusted(df):
         ).apply(truncate_to_2dp)
     work["volume"] = pd.to_numeric(work["volume"], errors="coerce") * work["split_factor"]
 
+    # Drop any rows where adjusted close is missing or zero before calculating MAs
+    # This prevents holiday/empty rows from breaking the rolling window calculation
+    work = work.dropna(subset=["close"]).copy()
+    work = work[work["close"] > 0].copy()
+
     close_series = pd.to_numeric(work["close"], errors="coerce")
     for window in [5, 10, 20, 50, 100, 200]:
         work[f"ma_{window}"] = close_series.rolling(window=window, min_periods=window).mean().round(4)
 
-    work["shares_outstanding"] = pd.NA
-    work["market_cap_cr"] = pd.NA
+    # Use None instead of pd.NA for SQLite compatibility
+    work["shares_outstanding"] = None
+    work["market_cap_cr"] = None
 
     return work[
         [
@@ -71,7 +79,8 @@ def attach_market_cap(adjusted_df, share_df):
 
     work = adjusted_df.copy()
     if share_df.empty:
-        return work
+        # Ensure any placeholders are converted to None for SQLite
+        return work.where(pd.notnull(work), None)
 
     shares = share_df.copy()
     shares["date"] = pd.to_datetime(shares["date"])
@@ -84,6 +93,10 @@ def attach_market_cap(adjusted_df, share_df):
 
     work["date"] = pd.to_datetime(work["date"])
     work = work.sort_values("date")
+
+    # Drop the placeholder columns before merging to avoid suffix collisions (_x, _y)
+    cols_to_drop = [c for c in ["shares_outstanding", "market_cap_cr"] if c in work.columns]
+    work = work.drop(columns=cols_to_drop)
 
     merged = pd.merge_asof(
         work,
@@ -103,7 +116,9 @@ def attach_market_cap(adjusted_df, share_df):
         pd.to_numeric(merged["shares_outstanding"], errors="coerce") / 1e7
     ).round(4)
     merged["date"] = merged["date"].dt.strftime("%Y-%m-%d")
-    return merged
+    
+    # Convert NAType/NaN to None for SQLite safety
+    return merged.where(pd.notnull(merged), None)
 
 
 def preserve_existing_market_cap(adjusted_df, existing_df):
@@ -163,6 +178,8 @@ def rebuild_symbols(symbols, preserve_market_cap=False):
                 shares = load_share_history(conn, symbol)
                 adjusted = attach_market_cap(adjusted, shares)
             replace_adjusted_prices(conn, symbol, adjusted)
+            save_indicators(conn, adjusted)
+            save_market_caps(conn, adjusted)
         log.info(
             f"[{idx}/{len(symbols)}] rebuilt split-adjusted history, market cap, and moving averages for {symbol}"
         )
@@ -186,6 +203,8 @@ def refresh_latest_rows(symbol_date_map):
             target_dates = {str(date_val) for date_val in changed_dates}
             subset = adjusted[adjusted["date"].isin(target_dates)].copy()
             upsert_adjusted_prices(conn, subset)
+            save_indicators(conn, subset)
+            save_market_caps(conn, subset)
         log.info(
             f"[{idx}/{len(items)}] updated market cap and moving averages for {len(target_dates):,} date(s) in {symbol}"
         )

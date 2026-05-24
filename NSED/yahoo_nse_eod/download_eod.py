@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
-from config import DEFAULT_BATCH_SIZE, DEFAULT_HISTORY_START, FAILED_EOD_FILE
+from config import DEFAULT_BATCH_SIZE, DEFAULT_HISTORY_START, FAILED_EOD_FILE, YAHOO_SUFFIX
 from adjust_splits import rebuild_symbols, refresh_latest_rows
 from db import (
     get_active_symbols,
@@ -19,6 +19,8 @@ from db import (
 )
 from logger import get_logger
 from yahoo_client import download_history_batch
+from sync_symbols import run_sync
+from sync_share_counts import run_share_download
 
 log = get_logger(__name__)
 
@@ -28,6 +30,8 @@ MAX_BATCH_RETRIES = 3
 def parse_args(args):
     options = {
         "bootstrap": "--bootstrap" in args,
+        "sync": "--sync" in args,
+        "refetch_last": "--refetch-last" in args,
         "limit": None,
         "batch_size": DEFAULT_BATCH_SIZE,
         "retry_sleep_secs": 2.0,
@@ -227,10 +231,51 @@ def save_failure_report(failures):
         writer.writerows(failures)
 
 
+def check_market_availability(last_dates, refetch_last=False):
+    """
+    Check if there is actually any new data on Yahoo for a major symbol.
+    Returns (True, latest_date) if we should proceed, (False, last_date) otherwise.
+    """
+    if not last_dates:
+        return True, None
+
+    # Use RELIANCE as the canary symbol
+    canary_sym = "RELIANCE"
+    if canary_sym not in last_dates:
+        # If RELIANCE isn't there, just pick the first one
+        canary_sym = next(iter(last_dates))
+
+    last_stored = last_dates[canary_sym]
+    yahoo_sym = f"{canary_sym}{YAHOO_SUFFIX}"
+    
+    log.info(f"Checking market availability using {canary_sym}...")
+    try:
+        # Fetch just the last day from Yahoo
+        import yfinance as yf
+        ticker = yf.Ticker(yahoo_sym)
+        df = ticker.history(period="1d")
+        if df.empty:
+            return False, last_stored
+        
+        latest_yahoo = df.index[-1].strftime("%Y-%m-%d")
+        
+        if refetch_last:
+            return True, latest_yahoo
+            
+        if latest_yahoo > last_stored:
+            return True, latest_yahoo
+        else:
+            return False, last_stored
+    except Exception as e:
+        log.warning(f"Market check failed ({e}). Proceeding with full check just in case.")
+        return True, None
+
+
 def run_eod_download(
     symbols,
     last_dates,
     bootstrap=False,
+    refetch_last=False,
     batch_size=DEFAULT_BATCH_SIZE,
     downloader=download_history_batch,
     retry_sleep_secs=2.0,
@@ -244,6 +289,19 @@ def run_eod_download(
             "failures": [],
         }
 
+    # Optimization: Canary Check
+    if not bootstrap:
+        has_new_data, latest_date = check_market_availability(last_dates, refetch_last)
+        if not has_new_data:
+            log.info(f"Market check: No new data found beyond {latest_date}. Skipping full download.")
+            return {
+                "total_rows": 0,
+                "total_actions": 0,
+                "failures": [],
+            }
+        else:
+            log.info(f"Market check: New data detected (Latest: {latest_date}). Proceeding...")
+
     total_rows = 0
     total_actions = 0
     failures = []
@@ -254,14 +312,26 @@ def run_eod_download(
             start = DEFAULT_HISTORY_START
         else:
             batch_last_dates = [
-                datetime.strptime(last_dates[symbol], "%Y-%m-%d") + timedelta(days=1)
+                datetime.strptime(last_dates[symbol], "%Y-%m-%d")
                 for symbol in batch["symbol"]
                 if symbol in last_dates and last_dates[symbol]
             ]
-            start = (
-                min(batch_last_dates).strftime("%Y-%m-%d")
-                if batch_last_dates else DEFAULT_HISTORY_START
+            if batch_last_dates:
+                min_last = min(batch_last_dates)
+                # If refetch_last is True, start from the last date to overwrite/refresh
+                # If last date is today, always start from today to refresh mid-day prices
+                if refetch_last or min_last.strftime("%Y-%m-%d") == today:
+                    start = min_last.strftime("%Y-%m-%d")
+                else:
+                    start = (min_last + timedelta(days=1)).strftime("%Y-%m-%d")
+            else:
+                start = DEFAULT_HISTORY_START
+
+        if not bootstrap and start > today:
+            log.info(
+                f"Batch {batch_no}: already up to date (last date: {start}) - skipping."
             )
+            continue
 
         log.info(
             f"Batch {batch_no}: downloading {len(batch):,} symbols "
@@ -306,6 +376,10 @@ def run_eod_download(
 
 def main():
     options = parse_args(sys.argv[1:])
+    if options["sync"] or options["bootstrap"]:
+        log.info(f"Starting symbol sync before {'bootstrap' if options['bootstrap'] else 'refresh'}...")
+        run_sync()
+
     symbols, last_dates = load_target_symbols(
         limit=options["limit"],
         only_symbols=options["symbols"],
@@ -314,10 +388,19 @@ def main():
         symbols,
         last_dates,
         bootstrap=options["bootstrap"],
+        refetch_last=options["refetch_last"],
         batch_size=options["batch_size"],
         retry_sleep_secs=options["retry_sleep_secs"],
         single_retry_sleep_secs=options["single_retry_sleep_secs"],
     )
+
+    if options["bootstrap"]:
+        log.info("Bootstrap complete: Automatically downloading historical share counts...")
+        run_share_download(symbols)
+
+        log.info("Share download complete: Performing final rebuild of all symbols to calculate market cap...")
+        rebuild_symbols(symbols["symbol"].tolist())
+        log.info("Full bootstrap process complete. Everything is ready for the screener.")
 
 
 if __name__ == "__main__":

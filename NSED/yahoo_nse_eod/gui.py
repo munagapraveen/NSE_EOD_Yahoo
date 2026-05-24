@@ -1,607 +1,666 @@
-"""CustomTkinter GUI for the standalone Yahoo/NSE EOD project."""
+"""
+PySide6 GUI for the standalone Yahoo/NSE EOD project.
+Replaces the old CustomTkinter implementation with a professional Qt-based dashboard.
+"""
 
-from __future__ import annotations
-
-import queue
-import sqlite3
-import subprocess
 import sys
+import os
+import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
-import customtkinter as ctk
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QTextEdit, QFrame, QScrollArea, QGroupBox,
+    QLineEdit, QDateEdit, QGridLayout, QSpacerItem, QSizePolicy,
+    QToolBar, QStatusBar, QCheckBox
+)
+from PySide6.QtCore import Qt, QProcess, QTimer, QSize, QDate
+from PySide6.QtGui import QFont, QIcon, QColor, QTextCursor
+from qt_material import apply_stylesheet
 
 from config import DB_FILE, FAILED_EOD_FILE
+from logger import get_logger
 
-BASE_DIR = Path(__file__).resolve().parent
+log = get_logger(__name__)
 
-
-def _find_python():
-    venv_names = [".venv", "venv", "env", ".env"]
-    if sys.platform == "win32":
-        candidates = ["Scripts/python.exe", "Scripts/python3.exe"]
-    else:
-        candidates = ["bin/python", "bin/python3"]
-    for name in venv_names:
-        for suffix in candidates:
-            candidate = BASE_DIR / name / suffix
-            if candidate.exists():
-                return str(candidate)
-    return sys.executable
-
-
-PYTHON = _find_python()
-
+BASE_DIR = Path(__file__).parent
 
 TASKS = [
-    ("Sync NSE Symbols", "sync_symbols.py", []),
-    ("Bootstrap Yahoo EOD", "download_eod.py", ["--bootstrap"]),
-    ("Download Shares", "download_shares.py", []),
+    ("Download Shares OS", "sync_share_counts.py", []),
     ("Build Adjusted Prices", "adjust_splits.py", []),
-    ("Daily Price Refresh", "download_eod.py", []),
     ("Review Corporate Actions", "corporate_actions.py", []),
     ("Detect Symbol Changes", "symbol_change_handler.py", []),
 ]
 
 TOOLTIPS = {
-    "Sync NSE Symbols": "Refresh the active NSE symbol master, ISINs, and Yahoo ticker mappings.",
-    "Bootstrap Yahoo EOD": "Download full historical Yahoo EOD price data for the tracked symbol universe.",
-    "Download Shares": "Fetch historical shares outstanding from Yahoo for market-cap calculations.",
+    "Bootstrap Yahoo EOD": "Download full historical Yahoo EOD price data, share counts, and rebuild all indices.",
+    "Download Shares OS": "Download historical shares outstanding from Yahoo Finance.",
     "Build Adjusted Prices": "Rebuild split-adjusted prices, market cap, and moving averages from stored raw data.",
     "Daily Price Refresh": "Append the latest available Yahoo EOD rows and update only the new dates.",
     "Review Corporate Actions": "Show stored split/dividend events and optionally rebuild affected symbols.",
     "Detect Symbol Changes": "Detect probable NSE ticker renames using NSE files and ISIN continuity.",
     "Apply Symbol Changes": "Apply detected renames to stored symbol history and adjusted datasets.",
     "Retry Failed EOD Downloads": "Retry only the symbols listed in the latest failed-EOD report file.",
-    "Run Screener": "Run the standalone Sharpe screener with the current filters and month windows.",
-    "Run Top 100": "Run the Sharpe screener and focus on the top 100 ranked stocks.",
-    "Latest Snapshot": "Query the latest adjusted row for many symbols from the standalone database.",
-    "Query Symbol": "Inspect one symbol's adjusted close, market cap, and moving averages by date range.",
-    "Refresh Stats": "Reload database counts and the latest stored date from the standalone DB.",
-    "Clear Log": "Clear the live log panel on the right side of the window.",
+    "Run Screener": "Run the standalone Sharpe screener with current filters.",
+    "Latest Snapshot": "Query the latest adjusted row for many symbols.",
+    "Query Symbol": "Inspect one symbol's detailed performance history.",
 }
 
+class SectionCard(QGroupBox):
+    def __init__(self, title, subtitle, parent=None):
+        super().__init__(title, parent)
+        self.setFont(QFont("Segoe UI", 9, QFont.Bold))
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(10, 2, 10, 5)
+        self.layout.setSpacing(4)
+        
+        if subtitle:
+            sub_label = QLabel(subtitle)
+            sub_label.setStyleSheet("color: #94a3b8; font-size: 10px; font-weight: normal;")
+            self.layout.addWidget(sub_label)
 
-class Tooltip:
-    def __init__(self, widget, text):
-        self.widget = widget
-        self.text = text
-        self.tip = None
-        self.widget.bind("<Enter>", self.show)
-        self.widget.bind("<Leave>", self.hide)
-
-    def show(self, _event=None):
-        if self.tip or not self.text:
-            return
-        x = self.widget.winfo_rootx() + 18
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
-        self.tip = ctk.CTkToplevel(self.widget)
-        self.tip.overrideredirect(True)
-        self.tip.geometry(f"+{x}+{y}")
-        self.tip.attributes("-topmost", True)
-        label = ctk.CTkLabel(
-            self.tip,
-            text=self.text,
-            justify="left",
-            corner_radius=10,
-            fg_color="#111827",
-            text_color="#e5e7eb",
-            wraplength=280,
-            padx=12,
-            pady=8,
-            font=ctk.CTkFont(size=12),
-        )
-        label.pack()
-
-    def hide(self, _event=None):
-        if self.tip is not None:
-            self.tip.destroy()
-            self.tip = None
-
-
-class YahooNSEGUI(ctk.CTk):
+class YahooNSEGUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.title("Yahoo NSE EOD Manager")
-        self.geometry("1380x860")
-        self.minsize(1100, 720)
+        self.setWindowTitle("Yahoo NSE EOD Dashboard")
+        self.resize(1150, 800) # Slightly smaller default size
+        
+        self.process = None
+        self.task_queue = []
+        self._init_ui()
+        
+        # Stats Timer
+        self.stats_timer = QTimer(self)
+        self.stats_timer.timeout.connect(self._refresh_stats)
+        self.stats_timer.start(5000)
+        
+        QTimer.singleShot(100, self._refresh_stats)
+        
+    def _init_ui(self):
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QHBoxLayout(central_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        ctk.set_appearance_mode("dark")
-        ctk.set_default_color_theme("blue")
+        # --- SIDEBAR ---
+        sidebar_scroll = QScrollArea()
+        sidebar_scroll.setFixedWidth(280) # Narrower sidebar
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_scroll.setStyleSheet("QScrollArea { border: none; background-color: #1e293b; }")
+        
+        sidebar_content = QWidget()
+        sidebar_content.setStyleSheet("background-color: #1e293b;")
+        self.sidebar_layout = QVBoxLayout(sidebar_content)
+        self.sidebar_layout.setContentsMargins(5, 5, 5, 5)
+        self.sidebar_layout.setSpacing(4)
 
-        self.running = False
-        self.output_queue = queue.Queue()
-        self.status_var = ctk.StringVar(value="Idle")
-        self.clock_var = ctk.StringVar(value="")
-        self.stats_vars = {
-            "db_path": ctk.StringVar(value=str(DB_FILE)),
-            "symbols": ctk.StringVar(value="-"),
-            "rows": ctk.StringVar(value="-"),
-            "latest": ctk.StringVar(value="-"),
-            "actions": ctk.StringVar(value="-"),
-        }
+        self._build_tasks_section()
+        self._build_sharpe_section()
+        self._build_snapshot_section()
+        self._build_query_section()
+        
+        self.sidebar_layout.addStretch()
+        sidebar_scroll.setWidget(sidebar_content)
+        main_layout.addWidget(sidebar_scroll)
 
-        self.sharpe_mode = ctk.StringVar(value="live")
-        self.sharpe_date_var = ctk.StringVar(value=datetime.today().strftime("%d/%m/%Y"))
-        self.sharpe_top_var = ctk.StringVar(value="50")
-        self.sharpe_mcap_var = ctk.StringVar(value="1000")
-        self.sharpe_rf_var = ctk.StringVar(value="6.5")
-        self.sharpe_turnover_var = ctk.StringVar(value="1.0")
-        self.sharpe_long_var = ctk.StringVar(value="6")
-        self.sharpe_short_var = ctk.StringVar(value="3")
+        # --- MAIN AREA ---
+        content_layout = QVBoxLayout()
+        main_layout.addLayout(content_layout)
 
-        self.query_symbol_var = ctk.StringVar(value="")
-        self.query_from_var = ctk.StringVar(value="")
-        self.query_to_var = ctk.StringVar(value="")
-        self.query_limit_var = ctk.StringVar(value="50")
+        # Header Bar
+        header = QFrame()
+        header.setFixedHeight(70) # Compact header
+        header.setStyleSheet("background-color: #0f172a; border-bottom: 1px solid #1e293b;")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(15, 0, 20, 0) # Compact margins
 
-        self.task_buttons = []
-        self._build_ui()
-        self._tick_clock()
-        self.after(150, self._refresh_stats_async)
+        title_label = QLabel("Yahoo NSE EOD")
+        title_label.setStyleSheet("color: #38bdf8; font-size: 20px; font-weight: bold;")
+        header_layout.addWidget(title_label)
 
-    def _build_ui(self):
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(1, weight=1)
+        header_layout.addSpacing(30)
 
-        header = ctk.CTkFrame(self, corner_radius=0, fg_color="#0f172a")
-        header.grid(row=0, column=0, columnspan=2, sticky="nsew")
-        header.grid_columnconfigure(1, weight=1)
+        # Stats in header
+        self.active_sym_label = QLabel("Active Symbols: -")
+        self.active_sym_label.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        header_layout.addWidget(self.active_sym_label)
 
-        ctk.CTkLabel(
-            header,
-            text="Yahoo NSE EOD Manager",
-            font=ctk.CTkFont(size=26, weight="bold"),
-        ).grid(row=0, column=0, padx=20, pady=14, sticky="w")
-        ctk.CTkLabel(
-            header,
-            text=f"Python: {Path(PYTHON).name}",
-            font=ctk.CTkFont(size=13),
-            text_color="#93c5fd",
-        ).grid(row=0, column=1, padx=10, pady=14, sticky="w")
-        ctk.CTkLabel(
-            header,
-            textvariable=self.clock_var,
-            font=ctk.CTkFont(size=13),
-        ).grid(row=0, column=2, padx=20, pady=14, sticky="e")
+        header_layout.addSpacing(15)
 
-        sidebar = ctk.CTkScrollableFrame(self, width=420, corner_radius=0)
-        sidebar.grid(row=1, column=0, sticky="nsew")
-        sidebar.grid_columnconfigure(0, weight=1)
+        self.updated_upto_label = QLabel("Updated upto: -")
+        self.updated_upto_label.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        header_layout.addWidget(self.updated_upto_label)
 
-        self._build_stats_card(sidebar)
-        self._build_tasks_card(sidebar)
-        self._build_sharpe_card(sidebar)
-        self._build_query_card(sidebar)
+        header_layout.addStretch()
 
-        right = ctk.CTkFrame(self, corner_radius=0)
-        right.grid(row=1, column=1, sticky="nsew", padx=(0, 0), pady=0)
-        right.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(1, weight=1)
+        self.clock_label = QLabel()
+        self.clock_label.setStyleSheet("color: #64748b; font-family: Consolas; font-size: 13px;")
+        header_layout.addWidget(self.clock_label)
+        
+        self.clock_timer = QTimer(self)
+        self.clock_timer.timeout.connect(self._update_clock)
+        self.clock_timer.start(1000)
+        self._update_clock()
 
-        topbar = ctk.CTkFrame(right, fg_color="transparent")
-        topbar.grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 10))
-        topbar.grid_columnconfigure(1, weight=1)
+        content_layout.addWidget(header)
 
-        ctk.CTkLabel(
-            topbar,
-            text="Run Log",
-            font=ctk.CTkFont(size=20, weight="bold"),
-        ).grid(row=0, column=0, sticky="w")
-        ctk.CTkLabel(
-            topbar,
-            textvariable=self.status_var,
-            font=ctk.CTkFont(size=13),
-            text_color="#fbbf24",
-        ).grid(row=0, column=1, sticky="e", padx=(10, 10))
-        stats_btn = ctk.CTkButton(
-            topbar,
-            text="Refresh Stats",
-            width=110,
-            command=self._refresh_stats_async,
-        )
-        stats_btn.grid(row=0, column=2, padx=(0, 10))
-        Tooltip(stats_btn, TOOLTIPS["Refresh Stats"])
-        clear_btn = ctk.CTkButton(
-            topbar,
-            text="Clear Log",
-            width=90,
-            fg_color="#334155",
-            hover_color="#475569",
-            command=self._clear_log,
-        )
-        clear_btn.grid(row=0, column=3)
-        Tooltip(clear_btn, TOOLTIPS["Clear Log"])
+        # Log Area
+        log_panel = QWidget()
+        log_panel.setStyleSheet("background-color: #0f172a;")
+        log_layout = QVBoxLayout(log_panel)
+        log_layout.setContentsMargins(15, 10, 15, 15)
 
-        self.log_box = ctk.CTkTextbox(
-            right,
-            corner_radius=18,
-            font=("Consolas", 13),
-            wrap="word",
-        )
-        self.log_box.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 18))
-        self.log_box.insert("end", "Ready.\n")
-        self.log_box.configure(state="disabled")
+        log_header = QHBoxLayout()
+        log_title = QLabel("Activity Log")
+        log_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #e2e8f0;")
+        log_header.addWidget(log_title)
+        
+        self.status_label = QLabel("Idle")
+        self.status_label.setStyleSheet("color: #fbbf24; font-weight: bold; font-size: 12px;")
+        log_header.addStretch()
+        log_header.addWidget(self.status_label)
+        log_header.addSpacing(15)
 
-    def _section_card(self, parent, title, subtitle=None):
-        card = ctk.CTkFrame(parent, corner_radius=18)
-        card.pack(fill="x", padx=14, pady=(14, 0))
-        ctk.CTkLabel(
-            card,
-            text=title,
-            font=ctk.CTkFont(size=18, weight="bold"),
-        ).pack(anchor="w", padx=16, pady=(14, 2))
-        if subtitle:
-            ctk.CTkLabel(
-                card,
-                text=subtitle,
-                font=ctk.CTkFont(size=12),
-                text_color="#94a3b8",
-            ).pack(anchor="w", padx=16, pady=(0, 12))
-        return card
+        self.refresh_stats_btn = QPushButton("Refresh")
+        self.refresh_stats_btn.setFixedHeight(28)
+        self.refresh_stats_btn.setCursor(Qt.PointingHandCursor)
+        self.refresh_stats_btn.clicked.connect(self._refresh_stats)
+        log_header.addWidget(self.refresh_stats_btn)
 
-    def _build_stats_card(self, parent):
-        card = self._section_card(
-            parent,
-            "Database",
-            "Standalone Yahoo/NSE SQLite status",
-        )
-        grid = ctk.CTkFrame(card, fg_color="transparent")
-        grid.pack(fill="x", padx=16, pady=(0, 14))
-        grid.grid_columnconfigure(1, weight=1)
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.setFixedHeight(28)
+        self.stop_btn.setStyleSheet("background-color: #991b1b;")
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.setCursor(Qt.PointingHandCursor)
+        self.stop_btn.clicked.connect(self._stop_task)
+        log_header.addWidget(self.stop_btn)
 
-        rows = [
-            ("DB File", "db_path"),
-            ("Tracked Symbols", "symbols"),
-            ("Adjusted Rows", "rows"),
-            ("Latest Date", "latest"),
-            ("Corporate Actions", "actions"),
-        ]
-        for idx, (label, key) in enumerate(rows):
-            ctk.CTkLabel(
-                grid,
-                text=label,
-                font=ctk.CTkFont(size=12),
-                text_color="#94a3b8",
-            ).grid(row=idx, column=0, sticky="w", pady=3)
-            ctk.CTkLabel(
-                grid,
-                textvariable=self.stats_vars[key],
-                font=ctk.CTkFont(size=13, weight="bold"),
-            ).grid(row=idx, column=1, sticky="w", padx=(12, 0), pady=3)
+        self.clear_log_btn = QPushButton("Clear")
+        self.clear_log_btn.setFixedHeight(28)
+        self.clear_log_btn.setCursor(Qt.PointingHandCursor)
+        self.clear_log_btn.clicked.connect(lambda: self.log_viewer.clear())
+        log_header.addWidget(self.clear_log_btn)
 
-    def _build_tasks_card(self, parent):
-        card = self._section_card(
-            parent,
-            "Pipeline Tasks",
-            "Run the core backend scripts without leaving the app",
-        )
-        button_grid = ctk.CTkFrame(card, fg_color="transparent")
-        button_grid.pack(fill="x", padx=16, pady=(0, 16))
-        button_grid.grid_columnconfigure((0, 1), weight=1)
+        log_layout.addLayout(log_header)
 
-        for idx, (label, script, args) in enumerate(TASKS):
-            btn = ctk.CTkButton(
-                button_grid,
-                text=label,
-                height=38,
-                command=lambda s=script, a=args, l=label: self._run_script(s, a, l),
-            )
-            btn.grid(row=idx // 2, column=idx % 2, sticky="ew", padx=6, pady=6)
-            self.task_buttons.append(btn)
-            Tooltip(btn, TOOLTIPS.get(label, label))
+        self.log_viewer = QTextEdit()
+        self.log_viewer.setReadOnly(True)
+        self.log_viewer.setFont(QFont("Consolas", 10))
+        self.log_viewer.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e293b;
+                color: #e2e8f0;
+                border: 1px solid #334155;
+                border-radius: 8px;
+                padding: 8px;
+            }
+        """)
+        log_layout.addWidget(self.log_viewer)
 
-        apply_btn = ctk.CTkButton(
-            card,
-            text="Apply Symbol Changes",
-            fg_color="#7c3aed",
-            hover_color="#6d28d9",
-            command=lambda: self._run_script(
-                "symbol_change_handler.py", ["--apply"], "Apply Symbol Changes"
-            ),
-        )
-        apply_btn.pack(fill="x", padx=16, pady=(0, 16))
-        Tooltip(apply_btn, TOOLTIPS["Apply Symbol Changes"])
+        content_layout.addWidget(log_panel)
 
-        retry_btn = ctk.CTkButton(
-            card,
-            text="Retry Failed EOD Downloads",
-            fg_color="#b45309",
-            hover_color="#92400e",
-            command=self._retry_failed_eod_downloads,
-        )
-        retry_btn.pack(fill="x", padx=16, pady=(0, 16))
-        self.task_buttons.append(retry_btn)
-        Tooltip(retry_btn, TOOLTIPS["Retry Failed EOD Downloads"])
+    def _build_tasks_section(self):
+        card = SectionCard("Pipeline Tasks", "Core data management")
+        
+        # New automated update button
+        auto_btn = QPushButton("Fetch Data (From Yahoo)")
+        auto_btn.setFixedHeight(30)
+        auto_btn.setFixedWidth(200)
+        auto_btn.setCursor(Qt.PointingHandCursor)
+        auto_btn.setToolTip("Automatically sync symbols, handle renames, and update prices.")
+        auto_btn.clicked.connect(self._run_fetch_data)
+        card.layout.addWidget(auto_btn, 0, Qt.AlignCenter)
+        
+        self.refetch_last_cb = QCheckBox("Refetch Last Updated Date")
+        self.refetch_last_cb.setChecked(False)
+        self.refetch_last_cb.setCursor(Qt.PointingHandCursor)
+        self.refetch_last_cb.setToolTip("If checked, overwrites the data for the last available date in the DB.")
+        self.refetch_last_cb.setStyleSheet("""
+            QCheckBox {
+                color: #e2e8f0;
+                font-size: 11px;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                background-color: #334155;
+                border: 1px solid #475569;
+                border-radius: 3px;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #38bdf8;
+                image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMCIgaGVpZ2h0PSIxMCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IiNmZmYiIHN0cm9rZS13aWR0aD0iNCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cG9seWxpbmUgcG9pbnRzPSIyMCA2IDkgMTcgNCAxMiIvPjwvc3ZnPg==");
+            }
+            QCheckBox::indicator:hover {
+                border-color: #38bdf8;
+            }
+        """)
+        card.layout.addWidget(self.refetch_last_cb, 0, Qt.AlignCenter)
+        
+        card.layout.addSpacing(10)
+        
+        for label, script, args in TASKS:
+            btn = QPushButton(label)
+            btn.setFixedHeight(30)
+            btn.setFixedWidth(200) # Even smaller buttons
+            btn.setToolTip(TOOLTIPS.get(label, ""))
+            btn.setCursor(Qt.PointingHandCursor)
+                
+            btn.clicked.connect(lambda checked=False, s=script, a=args, l=label: self._run_script(s, a, l))
+            card.layout.addWidget(btn, 0, Qt.AlignCenter)
+            
+        card.layout.addSpacing(5)
+        
+        apply_btn = QPushButton("Apply Symbol Changes")
+        apply_btn.setFixedHeight(30)
+        apply_btn.setFixedWidth(200)
+        apply_btn.setStyleSheet("background-color: #7c3aed;")
+        apply_btn.setToolTip(TOOLTIPS["Apply Symbol Changes"])
+        apply_btn.setCursor(Qt.PointingHandCursor)
+        apply_btn.clicked.connect(lambda: self._run_script("symbol_change_handler.py", ["--apply"], "Apply Symbol Changes"))
+        card.layout.addWidget(apply_btn, 0, Qt.AlignCenter)
 
-    def _build_sharpe_card(self, parent):
-        card = self._section_card(
-            parent,
-            "Sharpe Screener",
-            "Standalone screener powered by adjusted prices in this project",
-        )
+        retry_btn = QPushButton("Retry Failures")
+        retry_btn.setFixedHeight(30)
+        retry_btn.setFixedWidth(200)
+        retry_btn.setStyleSheet("background-color: #b45309;")
+        retry_btn.setCursor(Qt.PointingHandCursor)
 
-        mode_row = ctk.CTkFrame(card, fg_color="transparent")
-        mode_row.pack(fill="x", padx=16, pady=(0, 10))
-        ctk.CTkSegmentedButton(
-            mode_row,
-            values=["live", "historical"],
-            variable=self.sharpe_mode,
-        ).pack(fill="x")
+        retry_btn.clicked.connect(self._retry_failed)
+        card.layout.addWidget(retry_btn, 0, Qt.AlignCenter)
+        
+        self.sidebar_layout.addWidget(card)
 
-        form = ctk.CTkFrame(card, fg_color="transparent")
-        form.pack(fill="x", padx=16, pady=(0, 10))
-        form.grid_columnconfigure((0, 1), weight=1)
+    def _build_sharpe_section(self):
+        card = SectionCard("Sharpe Screener", "Ranking filters")
+        
+        grid = QGridLayout()
+        grid.setSpacing(8)
+        grid.setColumnStretch(1, 1)
+        
+        def add_row(label, widget, row):
+            l = QLabel(label)
+            l.setStyleSheet("color: #94a3b8; font-size: 11px;")
+            grid.addWidget(l, row, 0)
+            widget.setFixedWidth(120) # Narrower inputs
+            grid.addWidget(widget, row, 1, Qt.AlignRight)
 
-        self._labeled_entry(form, "As-of Date (dd/mm/yyyy)", self.sharpe_date_var, 0, 0)
-        self._labeled_entry(form, "Top N", self.sharpe_top_var, 0, 1)
-        self._labeled_entry(form, "MCAP Filter (Cr)", self.sharpe_mcap_var, 1, 0)
-        self._labeled_entry(form, "ROC Hurdle %", self.sharpe_rf_var, 1, 1)
-        self._labeled_entry(form, "Turnover (Cr)", self.sharpe_turnover_var, 2, 0)
-        self._labeled_entry(form, "Long / Short Months", None, 2, 1, dual_vars=(self.sharpe_long_var, self.sharpe_short_var))
+        self.sharpe_date = QDateEdit()
+        self.sharpe_date.setDate(QDate.currentDate())
+        self.sharpe_date.setCalendarPopup(True)
+        self.sharpe_date.setDisplayFormat("dd-MM-yyyy")
+        self.sharpe_date.setCursor(Qt.PointingHandCursor)
+        add_row("As-of Date:", self.sharpe_date, 0)
+        
+        self.sharpe_mcap = QLineEdit("1000")
+        add_row("MCAP (Cr):", self.sharpe_mcap, 1)
+        
+        self.sharpe_rf = QLineEdit("6.5")
+        add_row("ROC Hurdle %:", self.sharpe_rf, 2)
+        
+        self.sharpe_turnover = QLineEdit("1.0")
+        add_row("Turnover (Cr):", self.sharpe_turnover, 3)
+        
+        l_ls = QLabel("L/S Months:")
+        l_ls.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        grid.addWidget(l_ls, 4, 0)
+        
+        ls_container = QWidget()
+        ls_container.setFixedWidth(100)
+        ls_layout = QHBoxLayout(ls_container)
+        ls_layout.setContentsMargins(0, 0, 0, 0)
+        ls_layout.setSpacing(5)
+        self.sharpe_long = QLineEdit("6")
+        self.sharpe_short = QLineEdit("3")
+        ls_layout.addWidget(self.sharpe_long)
+        ls_layout.addWidget(QLabel("/"))
+        ls_layout.addWidget(self.sharpe_short)
+        grid.addWidget(ls_container, 4, 1, Qt.AlignRight)
+        
+        card.layout.addLayout(grid)
+        
+        run_btn = QPushButton("Run Sharpe Screener")
+        run_btn.setFixedHeight(35)
+        run_btn.setFixedWidth(200)
+        run_btn.setCursor(Qt.PointingHandCursor)
+        run_btn.setStyleSheet("font-weight: bold;")
+        run_btn.clicked.connect(self._run_sharpe)
+        card.layout.addWidget(run_btn, 0, Qt.AlignCenter)
+        
+        self.sidebar_layout.addWidget(card)
 
-        btn_row = ctk.CTkFrame(card, fg_color="transparent")
-        btn_row.pack(fill="x", padx=16, pady=(0, 16))
-        btn_row.grid_columnconfigure((0, 1), weight=1)
+    def _build_snapshot_section(self):
+        card = SectionCard("Latest Snapshot", "Recent entries")
+        
+        grid = QGridLayout()
+        l = QLabel("Symbol Limit:")
+        l.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        grid.addWidget(l, 0, 0)
+        
+        self.snapshot_limit = QLineEdit("50")
+        self.snapshot_limit.setFixedWidth(100)
+        grid.addWidget(self.snapshot_limit, 0, 1, Qt.AlignRight)
+        
+        card.layout.addLayout(grid)
+        
+        btn = QPushButton("Fetch Latest Rows")
+        btn.setFixedHeight(32)
+        btn.setFixedWidth(200)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setStyleSheet("background-color: #0f766e;")
+        btn.clicked.connect(self._run_snapshot)
+        card.layout.addWidget(btn, 0, Qt.AlignCenter)
+        
+        self.sidebar_layout.addWidget(card)
 
-        run_btn = ctk.CTkButton(btn_row, text="Run Screener", command=lambda: self._run_sharpe(False))
-        run_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        self.task_buttons.append(run_btn)
-        Tooltip(run_btn, TOOLTIPS["Run Screener"])
+    def _build_query_section(self):
+        card = SectionCard("Query History", "Symbol performance")
+        
+        grid = QGridLayout()
+        grid.setSpacing(8)
+        
+        def add_row(label, widget, row):
+            l = QLabel(label)
+            l.setStyleSheet("color: #94a3b8; font-size: 11px;")
+            grid.addWidget(l, row, 0)
+            widget.setFixedWidth(100)
+            grid.addWidget(widget, row, 1, Qt.AlignRight)
 
-        top_btn = ctk.CTkButton(
-            btn_row,
-            text="Run Top 100",
-            fg_color="#059669",
-            hover_color="#047857",
-            command=lambda: self._run_sharpe(True),
-        )
-        top_btn.grid(row=0, column=1, sticky="ew", padx=(6, 0))
-        self.task_buttons.append(top_btn)
-        Tooltip(top_btn, TOOLTIPS["Run Top 100"])
+        self.query_sym = QLineEdit()
+        self.query_sym.setPlaceholderText("RELIANCE")
+        add_row("Symbol:", self.query_sym, 0)
+        
+        self.query_from = QDateEdit()
+        self.query_from.setDate(QDate.currentDate().addDays(-30))
+        self.query_from.setCalendarPopup(True)
+        self.query_from.setDisplayFormat("dd-MM-yyyy")
+        self.query_from.setCursor(Qt.PointingHandCursor)
+        add_row("From:", self.query_from, 1)
+        
+        self.query_to = QDateEdit()
+        self.query_to.setDate(QDate.currentDate())
+        self.query_to.setCalendarPopup(True)
+        self.query_to.setDisplayFormat("dd-MM-yyyy")
+        self.query_to.setCursor(Qt.PointingHandCursor)
+        add_row("To:", self.query_to, 2)
+        
+        card.layout.addLayout(grid)
+        
+        btn = QPushButton("Fetch History Report")
+        btn.setFixedHeight(32)
+        btn.setFixedWidth(200)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setStyleSheet("background-color: #1d4ed8;")
+        btn.clicked.connect(self._run_query)
+        card.layout.addWidget(btn, 0, Qt.AlignCenter)
+        
+        self.sidebar_layout.addWidget(card)
 
-    def _build_query_card(self, parent):
-        card = self._section_card(
-            parent,
-            "Inspect Data",
-            "Query adjusted close, market cap, and moving averages",
-        )
-        form = ctk.CTkFrame(card, fg_color="transparent")
-        form.pack(fill="x", padx=16, pady=(0, 10))
-        form.grid_columnconfigure((0, 1), weight=1)
+    def _update_clock(self):
+        self.clock_label.setText(datetime.now().strftime("%H:%M:%S  |  %d %b %Y"))
 
-        self._labeled_entry(form, "Symbol", self.query_symbol_var, 0, 0)
-        self._labeled_entry(form, "Limit", self.query_limit_var, 0, 1)
-        self._labeled_entry(form, "From Date (yyyy-mm-dd)", self.query_from_var, 1, 0)
-        self._labeled_entry(form, "To Date (yyyy-mm-dd)", self.query_to_var, 1, 1)
+    def _refresh_stats(self):
+        if not DB_FILE.exists():
+            return
+            
+        def worker():
+            try:
+                conn = sqlite3.connect(DB_FILE)
+                active_count = conn.execute("SELECT COUNT(*) FROM symbols WHERE active = 1").fetchone()[0]
+                latest_date = conn.execute("SELECT MAX(date) FROM adjusted_eod_prices").fetchone()[0]
+                conn.close()
+                self.active_sym_label.setText(f"Active Symbols: {active_count:,}")
+                self.updated_upto_label.setText(f"Updated upto: {latest_date or '-'}")
+            except Exception as e:
+                log.error(f"Failed to refresh stats: {e}")
 
-        btn_row = ctk.CTkFrame(card, fg_color="transparent")
-        btn_row.pack(fill="x", padx=16, pady=(0, 16))
-        btn_row.grid_columnconfigure((0, 1), weight=1)
-
-        latest_btn = ctk.CTkButton(
-            btn_row,
-            text="Latest Snapshot",
-            fg_color="#0f766e",
-            hover_color="#115e59",
-            command=self._run_latest_query,
-        )
-        latest_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        self.task_buttons.append(latest_btn)
-        Tooltip(latest_btn, TOOLTIPS["Latest Snapshot"])
-
-        query_btn = ctk.CTkButton(
-            btn_row,
-            text="Query Symbol",
-            fg_color="#1d4ed8",
-            hover_color="#1e40af",
-            command=self._run_symbol_query,
-        )
-        query_btn.grid(row=0, column=1, sticky="ew", padx=(6, 0))
-        self.task_buttons.append(query_btn)
-        Tooltip(query_btn, TOOLTIPS["Query Symbol"])
-
-    def _labeled_entry(self, parent, label, variable, row, column, dual_vars=None):
-        wrapper = ctk.CTkFrame(parent, fg_color="transparent")
-        wrapper.grid(row=row, column=column, sticky="ew", padx=6, pady=6)
-        ctk.CTkLabel(
-            wrapper,
-            text=label,
-            font=ctk.CTkFont(size=12),
-            text_color="#94a3b8",
-        ).pack(anchor="w", pady=(0, 4))
-
-        if dual_vars is not None:
-            row_frame = ctk.CTkFrame(wrapper, fg_color="transparent")
-            row_frame.pack(fill="x")
-            first, second = dual_vars
-            ctk.CTkEntry(row_frame, textvariable=first).pack(side="left", fill="x", expand=True)
-            ctk.CTkLabel(row_frame, text="/", width=18).pack(side="left", padx=6)
-            ctk.CTkEntry(row_frame, textvariable=second).pack(side="left", fill="x", expand=True)
-        else:
-            ctk.CTkEntry(wrapper, textvariable=variable).pack(fill="x")
-
-    def _tick_clock(self):
-        self.clock_var.set(datetime.now().strftime("%a %d %b %Y  %H:%M:%S"))
-        self.after(1000, self._tick_clock)
-
-    def _append_log(self, text):
-        self.log_box.configure(state="normal")
-        self.log_box.insert("end", text)
-        self.log_box.see("end")
-        self.log_box.configure(state="disabled")
-
-    def _clear_log(self):
-        self.log_box.configure(state="normal")
-        self.log_box.delete("1.0", "end")
-        self.log_box.configure(state="disabled")
-
-    def _set_buttons_state(self, disabled):
-        state = "disabled" if disabled else "normal"
-        for btn in self.task_buttons:
-            btn.configure(state=state)
+        threading.Thread(target=worker, daemon=True).start()
 
     def _run_script(self, script_name, args, label):
-        if self.running:
-            self._append_log("Another task is already running.\n")
+        if self.process and self.process.state() != QProcess.NotRunning:
+            self._log(f"\n[Warning] Another task is already running: {self.status_label.text()}\n")
             return
 
-        self.running = True
-        self._set_buttons_state(True)
-        self.status_var.set(f"Running: {label}")
-        cmd = [PYTHON, str(BASE_DIR / script_name)] + list(args)
-        self._append_log(f"\n{'=' * 72}\nStarting: {label}\n{'=' * 72}\n")
+        self.log_viewer.append(f"\n{'='*70}\nStarting: {label}\n{'='*70}\n")
+        self.status_label.setText(f"Running: {label}")
+        self.stop_btn.setEnabled(True)
+        
+        self.process = QProcess(self)
+        self.process.setProcessChannelMode(QProcess.MergedChannels)
+        self.process.readyReadStandardOutput.connect(self._handle_output)
+        self.process.finished.connect(lambda code, exit_status, l=label: self._handle_finished(code, exit_status, l))
+        self.process.start(sys.executable, [str(BASE_DIR / script_name)] + args)
 
-        def worker():
+    def _handle_output(self):
+        data = self.process.readAllStandardOutput().data().decode()
+        self.log_viewer.insertPlainText(data)
+        self.log_viewer.moveCursor(QTextCursor.End)
+
+    def _handle_finished(self, exit_code, exit_status, label):
+        self.stop_btn.setEnabled(False)
+        if exit_code == 0:
+            self.status_label.setText(f"Done: {label}")
+            self._log(f"\n[Success] {label} completed successfully.\n")
+            # If there are more tasks in the queue, process them
+            if self.task_queue:
+                self._process_next_task()
+        else:
+            self.status_label.setText(f"Failed: {label}")
+            self._log(f"\n[Error] {label} failed with exit code {exit_code}.\n")
+            # Clear queue on failure to prevent cascading
+            if self.task_queue:
+                self._log("[System] Clearing task queue due to failure.\n")
+                self.task_queue = []
+        self._refresh_stats()
+
+    def _process_next_task(self):
+        if not self.task_queue:
+            return
+        script, args, label = self.task_queue.pop(0)
+        self._run_script(script, args, label)
+
+    def _run_fetch_data(self):
+        if self.process and self.process.state() != QProcess.NotRunning:
+            self._log("\n[Warning] Cannot start Fetch Data: Another task is already running.\n")
+            return
+
+        # Check if DB is fresh or update
+        is_fresh = True
+        if DB_FILE.exists():
             try:
-                proc = subprocess.Popen(
-                    cmd,
-                    cwd=str(BASE_DIR),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                )
-                for line in proc.stdout:
-                    if line:
-                        self.output_queue.put(("line", line))
-                proc.wait()
-                self.output_queue.put(("done", proc.returncode, label))
-            except Exception as exc:
-                self.output_queue.put(("error", str(exc), label))
+                import sqlite3
+                with sqlite3.connect(DB_FILE) as conn:
+                    # Check if we have any adjusted prices stored
+                    count = conn.execute("SELECT COUNT(*) FROM adjusted_eod_prices").fetchone()[0]
+                    if count > 0:
+                        is_fresh = False
+            except Exception:
+                pass
 
-        threading.Thread(target=worker, daemon=True).start()
-        self.after(80, self._poll_output)
+        if is_fresh:
+            self._log("\n[System] Fresh database detected. Starting Bootstrap (from 2020)...\n")
+            self.task_queue = [
+                ("download_eod.py", ["--bootstrap"], "Bootstrap Yahoo EOD")
+            ]
+        else:
+            self._log("\n[System] Existing data detected. Starting Incremental Update...\n")
+            eod_args = []
+            if self.refetch_last_cb.isChecked():
+                eod_args.append("--refetch-last")
+                self._log("[System] Option enabled: Refetching last available date.\n")
+            
+            self.task_queue = [
+                ("sync_symbols.py", [], "Sync Symbols"),
+                ("symbol_change_handler.py", ["--apply"], "Apply Symbol Changes"),
+                ("download_eod.py", eod_args, "Download EOD Updates"),
+                ("sync_share_counts.py", ["--only-missing"], "Download Missing Shares")
+            ]
+        
+        self._process_next_task()
 
-    def _poll_output(self):
-        while True:
-            try:
-                item = self.output_queue.get_nowait()
-            except queue.Empty:
-                break
+    def _stop_task(self):
+        if self.process:
+            self._log("\n[System] Sending termination signal to task...\n")
+            if self.task_queue:
+                self._log("[System] Clearing task queue.\n")
+                self.task_queue = []
+            self.process.terminate()
+            if not self.process.waitForFinished(3000):
+                self.process.kill()
 
-            kind = item[0]
-            if kind == "line":
-                self._append_log(item[1])
-            elif kind == "error":
-                _, message, label = item
-                self._append_log(f"\nError while running {label}: {message}\n")
-                self.status_var.set("Failed")
-                self.running = False
-                self._set_buttons_state(False)
-                self._refresh_stats_async()
-            elif kind == "done":
-                _, returncode, label = item
-                if returncode == 0:
-                    self._append_log(f"\nCompleted: {label}\n")
-                    self.status_var.set(f"Done: {label}")
-                else:
-                    self._append_log(f"\nFailed: {label} (exit code {returncode})\n")
-                    self.status_var.set(f"Failed: {label}")
-                self.running = False
-                self._set_buttons_state(False)
-                self._refresh_stats_async()
+    def _log(self, text):
+        self.log_viewer.append(text)
+        self.log_viewer.moveCursor(QTextCursor.End)
 
-        if self.running:
-            self.after(80, self._poll_output)
-
-    def _run_sharpe(self, top_100):
+    def _run_sharpe(self):
+        date_str = self.sharpe_date.date().toString("yyyy-MM-dd")
         args = [
-            "--top", "100" if top_100 else self.sharpe_top_var.get().strip(),
-            "--mcap", self.sharpe_mcap_var.get().strip(),
-            "--rf", self.sharpe_rf_var.get().strip(),
-            "--turnover", self.sharpe_turnover_var.get().strip(),
-            "--long-months", self.sharpe_long_var.get().strip(),
-            "--short-months", self.sharpe_short_var.get().strip(),
+            "--mcap", self.sharpe_mcap.text(),
+            "--rf", self.sharpe_rf.text(),
+            "--turnover", self.sharpe_turnover.text(),
+            "--long-months", self.sharpe_long.text(),
+            "--short-months", self.sharpe_short.text(),
+            "--date", date_str,
         ]
-        label = "Sharpe Screener"
-        if self.sharpe_mode.get() == "historical":
-            raw = self.sharpe_date_var.get().strip()
-            try:
-                date_val = datetime.strptime(raw, "%d/%m/%Y").strftime("%Y-%m-%d")
-            except ValueError:
-                self._append_log("Invalid Sharpe date. Use dd/mm/yyyy.\n")
-                return
-            args += ["--date", date_val]
-            label = f"Sharpe Screener ({raw})"
-        self._run_script("sharpe_screener.py", args, label)
+        self._run_script("sharpe_screener.py", args, "Sharpe Screener")
 
-    def _run_symbol_query(self):
-        symbol = self.query_symbol_var.get().strip().upper()
-        if not symbol:
-            self._append_log("Enter a symbol for query.\n")
-            return
-        args = ["--symbol", symbol, "--limit", self.query_limit_var.get().strip() or "50"]
-        if self.query_from_var.get().strip():
-            args += ["--from", self.query_from_var.get().strip()]
-        if self.query_to_var.get().strip():
-            args += ["--to", self.query_to_var.get().strip()]
-        self._run_script("query_prices.py", args, f"Query {symbol}")
-
-    def _run_latest_query(self):
-        args = ["--latest", "--limit", self.query_limit_var.get().strip() or "50"]
+    def _run_snapshot(self):
+        args = ["--latest", "--limit", self.snapshot_limit.text()]
         self._run_script("query_prices.py", args, "Latest Snapshot")
 
-    def _retry_failed_eod_downloads(self):
+    def _run_query(self):
+        symbol = self.query_sym.text().strip().upper()
+        if not symbol:
+            self._log("\n[Error] Please enter a symbol ticker.\n")
+            return
+        from_date = self.query_from.date().toString("yyyy-MM-dd")
+        to_date = self.query_to.date().toString("yyyy-MM-dd")
+        args = ["--symbol", symbol, "--limit", "5000", "--from", from_date, "--to", to_date]
+        self._run_script("query_prices.py", args, f"Query {symbol}")
+
+    def _retry_failed(self):
         if not FAILED_EOD_FILE.exists():
-            self._append_log("No failed EOD download file found.\n")
+            self._log("\n[Info] No failed EOD download file found.\n")
             return
+        import csv
+        symbols = []
         try:
-            import csv
-
-            with FAILED_EOD_FILE.open("r", newline="", encoding="utf-8") as handle:
-                reader = csv.DictReader(handle)
-                symbols = []
+            with open(FAILED_EOD_FILE, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
                 for row in reader:
-                    symbol = str(row.get("symbol", "")).strip().upper()
-                    if symbol and symbol not in symbols:
-                        symbols.append(symbol)
-        except Exception as exc:
-            self._append_log(f"Could not read failed EOD file: {exc}\n")
+                    s = row.get("symbol", "").strip().upper()
+                    if s and s not in symbols:
+                        symbols.append(s)
+        except Exception as e:
+            self._log(f"\n[Error] Failed to read failures file: {e}\n")
             return
-
         if not symbols:
-            self._append_log("Failed EOD file is empty.\n")
+            self._log("\n[Info] Failures file is empty.\n")
             return
-
-        args = ["--symbols", ",".join(symbols)]
-        self._run_script("download_eod.py", args, "Retry Failed EOD Downloads")
-
-    def _refresh_stats_async(self):
-        def worker():
-            data = {
-                "symbols": "-",
-                "rows": "-",
-                "latest": "-",
-                "actions": "-",
-            }
-            try:
-                if DB_FILE.exists():
-                    conn = sqlite3.connect(DB_FILE)
-                    try:
-                        data["symbols"] = f"{conn.execute('SELECT COUNT(*) FROM symbols WHERE active = 1').fetchone()[0]:,}"
-                        data["rows"] = f"{conn.execute('SELECT COUNT(*) FROM adjusted_eod_prices').fetchone()[0]:,}"
-                        latest = conn.execute("SELECT MAX(date) FROM adjusted_eod_prices").fetchone()[0]
-                        data["latest"] = latest or "-"
-                        data["actions"] = f"{conn.execute('SELECT COUNT(*) FROM corporate_actions').fetchone()[0]:,}"
-                    finally:
-                        conn.close()
-            except Exception as exc:
-                data["latest"] = f"Error: {exc}"
-            self.after(0, lambda: self._apply_stats(data))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _apply_stats(self, data):
-        for key, value in data.items():
-            self.stats_vars[key].set(value)
-
+        self._run_script("download_eod.py", ["--symbols", ",".join(symbols)], "Retry Failed EOD")
 
 def main():
-    app = YahooNSEGUI()
-    app.mainloop()
-
+    app = QApplication(sys.argv)
+    apply_stylesheet(app, theme='dark_blue.xml')
+    app.setStyleSheet(app.styleSheet() + """
+        QMainWindow { background-color: #0f172a; }
+        QPushButton { border-radius: 4px; padding: 4px; font-size: 11px; }
+        QLineEdit, QDateEdit { 
+            background-color: #334155; 
+            border: 1px solid #475569; 
+            border-radius: 4px; 
+            padding: 2px 4px; 
+            color: white;
+            font-size: 11px;
+            height: 26px;
+        }
+        QDateEdit {
+            padding-right: 25px;
+        }
+        QDateEdit::drop-down {
+            subcontrol-origin: border;
+            subcontrol-position: top right;
+            width: 25px;
+            border-left-width: 1px;
+            border-left-color: #475569;
+            border-left-style: solid;
+            background-color: #1e293b;
+            border-top-right-radius: 4px;
+            border-bottom-right-radius: 4px;
+        }
+        QDateEdit::down-arrow {
+            image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMCIgaGVpZ2h0PSIxMCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMyIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cGF0aCBkPSJNNiA5bDYgNiA2LTYiLz48L3N2Zz4=");
+            width: 12px;
+            height: 12px;
+        }
+        QCalendarWidget QWidget {
+            alternate-background-color: #1e293b;
+        }
+        QCalendarWidget QAbstractItemView:enabled {
+            color: #f1f5f9;
+            background-color: #0f172a;
+            selection-background-color: #38bdf8;
+            selection-color: #0f172a;
+        }
+        QCalendarWidget QWidget#qt_calendar_navigationbar {
+            background-color: #1e293b;
+            min-height: 35px;
+        }
+        QCalendarWidget QToolButton {
+            color: #f1f5f9;
+            background-color: transparent;
+            icon-size: 20px;
+            font-weight: bold;
+            border-radius: 4px;
+        }
+        QCalendarWidget QToolButton:hover {
+            background-color: #334155;
+        }
+        QCalendarWidget QToolButton#qt_calendar_prevmonth {
+            qproperty-icon: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMyIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cGF0aCBkPSJNMTUgMThsLTYtNiA2LTYiLz48L3N2Zz4=");
+        }
+        QCalendarWidget QToolButton#qt_calendar_nextmonth {
+            qproperty-icon: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMyIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cGF0aCBkPSJNOSAxOGw2LTYtNi02Ii8+PC9zdmc+");
+        }
+        QCalendarWidget QSpinBox {
+            color: #f1f5f9;
+            background-color: #334155;
+            selection-background-color: #38bdf8;
+            selection-color: #0f172a;
+            border-radius: 3px;
+        }
+        /* Style for the day names header */
+        QCalendarWidget QWidget#qt_calendar_calendarview {
+            background-color: #0f172a;
+        }
+        QCalendarWidget QMenu {
+            background-color: #1e293b;
+            color: #f1f5f9;
+            border: 1px solid #334155;
+        }
+        QCalendarWidget QTableView {
+            alternate-background-color: #1e293b;
+        }
+        QGroupBox { 
+            border: 1px solid #334155; 
+            border-radius: 6px; 
+            margin-top: 2px;
+            background-color: #1e293b;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 8px;
+            padding: 0 3px;
+            color: #38bdf8;
+        }
+    """)
+    window = YahooNSEGUI()
+    window.show()
+    sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()

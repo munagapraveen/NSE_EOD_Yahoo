@@ -10,12 +10,12 @@ TEST_DIR = Path(__file__).resolve().parent
 if str(TEST_DIR) not in sys.path:
     sys.path.insert(0, str(TEST_DIR))
 
-import download_shares
+import download_os_share_history
 
 
 class DownloadSharesTests(unittest.TestCase):
     def test_parse_args(self):
-        options = download_shares.parse_args(
+        options = download_os_share_history.parse_args(
             ["--limit", "10", "--only-missing", "--sleep", "0.1", "--retry-sleep", "0.2", "--workers", "6"]
         )
         self.assertEqual(options["limit"], 10)
@@ -48,7 +48,7 @@ class DownloadSharesTests(unittest.TestCase):
         def fake_persist(records):
             persisted.extend(records)
 
-        summary = download_shares.run_share_download(
+        summary = download_os_share_history.run_share_download(
             symbols,
             workers=2,
             sleep_secs=0,
@@ -70,8 +70,8 @@ class DownloadSharesTests(unittest.TestCase):
             failed_rows = [
                 {"symbol": "AAA", "yahoo_symbol": "AAA.NS", "stage": "retry-failed", "error": "boom"}
             ]
-            with mock.patch.object(download_shares, "FAILED_SHARES_FILE", report_path):
-                download_shares.save_failure_report(failed_rows)
+            with mock.patch.object(download_os_share_history, "FAILED_SHARES_FILE", report_path):
+                download_os_share_history.save_failure_report(failed_rows)
 
             self.assertTrue(report_path.exists())
             content = report_path.read_text(encoding="utf-8")

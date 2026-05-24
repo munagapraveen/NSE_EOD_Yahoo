@@ -17,7 +17,7 @@ FAILED_EOD_FILE = DATA_DIR / "eod_download_failures_latest.csv"
 YAHOO_SUFFIX = ".NS"
 DEFAULT_BATCH_SIZE = 75
 DEFAULT_LOOKBACK_DAYS = 7
-DEFAULT_HISTORY_START = "2021-01-01"
+DEFAULT_HISTORY_START = "2024-01-01"
 
 NSE_REPORTS_URL = "https://www.nseindia.com/static/market-data/securities-available-for-trading"
 NSE_SYMBOL_PAGE_URL = "https://www.nseindia.com/static/market-data/securities-available-for-trading"

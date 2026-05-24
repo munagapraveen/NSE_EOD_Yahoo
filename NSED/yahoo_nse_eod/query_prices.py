@@ -73,12 +73,15 @@ def parse_args(args):
 
 
 def build_query(options):
-    table_alias = "a" if options["latest_only"] else ""
-
     if options["latest_only"]:
         query = """
-            SELECT a.*
+            SELECT a.*, i.ma_5, i.ma_10, i.ma_20, i.ma_50, i.ma_100, i.ma_200,
+                   m.market_cap_cr, m.shares_outstanding
             FROM adjusted_eod_prices a
+            LEFT JOIN indicators i
+                ON a.symbol = i.symbol AND a.date = i.date
+            LEFT JOIN marketcap m
+                ON a.symbol = m.symbol AND a.date = m.date
             INNER JOIN (
                 SELECT symbol, MAX(date) AS max_date
                 FROM adjusted_eod_prices
@@ -89,13 +92,23 @@ def build_query(options):
         """
         conditions = []
         params = []
+        table_alias = "a"
     else:
-        query = "SELECT * FROM adjusted_eod_prices"
+        query = """
+            SELECT a.*, i.ma_5, i.ma_10, i.ma_20, i.ma_50, i.ma_100, i.ma_200,
+                   m.market_cap_cr, m.shares_outstanding
+            FROM adjusted_eod_prices a
+            LEFT JOIN indicators i
+                ON a.symbol = i.symbol AND a.date = i.date
+            LEFT JOIN marketcap m
+                ON a.symbol = m.symbol AND a.date = m.date
+        """
         conditions = []
         params = []
+        table_alias = "a"
 
     def qualify(column_name):
-        return f"{table_alias}.{column_name}" if table_alias else column_name
+        return f"{table_alias}.{column_name}"
 
     if options["symbol"]:
         conditions.append(f"{qualify('symbol')} = ?")

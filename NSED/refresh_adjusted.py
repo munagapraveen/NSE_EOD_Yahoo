@@ -15,6 +15,7 @@ Requirements:
 import sys
 from datetime import datetime, timedelta
 
+from analytics_store import rebuild_analytics_for_symbols
 from config import YEARS_BACK
 from db import get_connection, setup_schema
 from kite_utils import get_kite, refresh_symbol_data
@@ -50,6 +51,9 @@ def main():
         print("No symbols provided.")
         return
 
+    if refreshed_symbols:
+        rebuild_analytics_for_symbols(refreshed_symbols)
+
     log.info("")
     log.info("=" * 55)
     log.info("PRICE ADJUSTMENT REFRESH")
@@ -65,6 +69,7 @@ def main():
 
     kite    = get_kite()
     success = fail = 0
+    refreshed_symbols = []
 
     with get_connection() as conn:
         setup_schema(conn)
@@ -77,6 +82,7 @@ def main():
                 )
                 if rows > 0:
                     success += 1
+                    refreshed_symbols.append(symbol)
                 else:
                     fail += 1
             except Exception as exc:

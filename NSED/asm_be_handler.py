@@ -14,6 +14,7 @@ Requirements:
 
 from datetime import datetime, timedelta
 
+from analytics_store import rebuild_analytics_for_symbols
 from config import YEARS_BACK
 from db import (
     get_connection,
@@ -193,6 +194,7 @@ def main():
             workers=3,
             progress_label="ASM / BE Handler",
         )
+        rebuild_analytics_for_symbols([task["symbol"] for task in tasks])
     else:
         results = {"success": 0, "fail": 0, "total_rows": 0}
 

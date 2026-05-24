@@ -3,4 +3,5 @@ requests
 yfinance
 numpy
 openpyxl
-customtkinter
+PySide6
+qt-material

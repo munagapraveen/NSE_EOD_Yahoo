@@ -30,6 +30,7 @@ import time
 from datetime import datetime, timedelta
 
 from config import GENERATE_TOKEN, DB_FILE, YEARS_BACK
+from analytics_store import rebuild_analytics_for_symbols
 from db import get_connection, setup_schema, get_last_date, insert_eod_rows
 from kite_utils import (
     generate_token,
@@ -38,6 +39,7 @@ from kite_utils import (
     run_parallel_ohlcv_tasks,
 )
 from logger import get_logger
+from nse_master import run_master_sync
 
 log = get_logger(__name__)
 
@@ -92,10 +94,20 @@ def main():
 
     t_start = time.time()
 
-    # Step 1 -- Get instrument list once
-    instruments_df = get_nse_instruments(kite)
+    # Step 1 -- Sync clean NSE master universe (equity + ETF)
+    master_df, _ = run_master_sync()
+    master_symbols = set(master_df["symbol"].astype(str).str.upper().tolist())
 
-    # Step 2 -- Pre-check DB to find which symbols need updating
+    # Step 2 -- Get Zerodha instrument list once
+    instruments_df = get_nse_instruments(kite)
+    instruments_df = instruments_df[
+        instruments_df["base_symbol"].astype(str).str.upper().isin(master_symbols)
+    ].copy()
+
+    matched_symbols = set(instruments_df["base_symbol"].astype(str).str.upper().tolist())
+    missing_symbols = sorted(master_symbols - matched_symbols)
+
+    # Step 3 -- Pre-check DB to find which symbols need updating
     # Done in a single connection before spawning threads
     log.info("Checking which symbols need updating ...")
     tasks       = []
@@ -133,6 +145,13 @@ def main():
             })
 
     total      = len(tasks)
+    log.info(f"  Master universe    : {len(master_symbols):,} symbols")
+    log.info(f"  Matched in Zerodha : {len(matched_symbols):,} symbols")
+    if missing_symbols:
+        sample = ", ".join(missing_symbols[:15])
+        suffix = " ..." if len(missing_symbols) > 15 else ""
+        log.warning(f"  Missing in Zerodha : {len(missing_symbols):,} symbols")
+        log.warning(f"    Sample missing   : {sample}{suffix}")
     log.info(f"  Already up to date : {skip_count:,} symbols")
     log.info(f"  To download        : {total:,} symbols")
     log.info("")
@@ -151,6 +170,10 @@ def main():
         workers=n_workers,
         progress_label="Daily EOD Download",
     )
+
+    updated_symbols = [task["symbol"] for task in tasks]
+    if updated_symbols:
+        rebuild_analytics_for_symbols(updated_symbols)
 
     # Step 6 -- Summary
     elapsed    = time.time() - t_start
