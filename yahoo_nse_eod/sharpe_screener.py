@@ -8,7 +8,7 @@ No dependency on Zerodha code, DB, or APIs.
 
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -32,12 +32,8 @@ CIRCUIT_LOOKBACK = 63
 CIRCUIT_BANDS = [5.0, 10.0, 20.0]
 CIRCUIT_TOLERANCE = 0.025
 TRADING_DAYS_52W = 252
-DAYS_TO_LOAD = 253
-TRADING_DAYS_PER_MONTH = 21
-
-
-def months_to_trading_days(months):
-    return max(1, int(months) * TRADING_DAYS_PER_MONTH)
+# We load slightly more than 1 year to find the "next available date" for 12M ROC
+DAYS_TO_LOAD = 380 
 
 
 def load_mcap_snapshot(conn, as_of_date=None):
@@ -147,8 +143,10 @@ def load_price_history(conn, symbols, days=DAYS_TO_LOAD, as_of_date=None):
         pd.concat(all_frames, ignore_index=True)
         if all_frames else pd.DataFrame()
     )
-    prices_df.sort_values(["symbol", "date"], inplace=True)
-    prices_df.reset_index(drop=True, inplace=True)
+    if not prices_df.empty:
+        prices_df["date"] = pd.to_datetime(prices_df["date"])
+        prices_df.sort_values(["symbol", "date"], inplace=True)
+        prices_df.reset_index(drop=True, inplace=True)
 
     log.info(
         f"  Price history loaded : {len(prices_df):,} rows  "
@@ -157,29 +155,60 @@ def load_price_history(conn, symbols, days=DAYS_TO_LOAD, as_of_date=None):
     return prices_df
 
 
-def compute_and_filter_roc(prices_df, roc_filter):
+def get_price_at_date(symbol_df, target_date):
+    """
+    Returns the price on the target_date or the next available date.
+    Assumes symbol_df is sorted by date ascending.
+    """
+    matches = symbol_df[symbol_df["date"] >= target_date]
+    if matches.empty:
+        return None, None
+    first_match = matches.iloc[0]
+    return float(first_match["close"]), first_match["date"]
+
+
+def compute_and_filter_roc(prices_df, snapshot_date, roc_filter):
     log.info(f"Step 4 -- Annual ROC filter >= {roc_filter}% ...")
-
+    
+    # Target date is exactly 12 months ago
+    target_date = pd.to_datetime(snapshot_date) - pd.DateOffset(months=12)
+    
     roc_list = []
-    grouped = prices_df.groupby("symbol")["close"]
+    # Ensure date is datetime
+    if not pd.api.types.is_datetime64_any_dtype(prices_df["date"]):
+        prices_df["date"] = pd.to_datetime(prices_df["date"])
+        
+    grouped = prices_df.groupby("symbol")
 
-    for symbol, closes in grouped:
-        arr = closes.values.astype(float)
-        if len(arr) < DAYS_TO_LOAD:
+    for symbol, df in grouped:
+        # Sort by date ascending
+        df = df.sort_values("date")
+        
+        latest_price = float(df.iloc[-1]["close"])
+        
+        # Find price at next available date from 12 months ago
+        base_price, base_date = get_price_at_date(df, target_date)
+        
+        if base_price is None or base_price <= 0:
             continue
-        if arr[0] <= 0:
+            
+        # Option A: Minimum history requirement. 
+        # If the next available date is too far from our target (e.g. more than 15 days after), 
+        # it means the stock wasn't trading 12 months ago.
+        if (base_date - target_date).days > 15:
             continue
-        roc = (arr[-1] - arr[0]) / arr[0] * 100
+
+        roc = (latest_price - base_price) / base_price * 100
         roc_list.append({"symbol": symbol, "ROC_annual": round(roc, 2)})
 
     roc_df = pd.DataFrame(roc_list)
     if roc_df.empty:
-        log.warning("No stocks had full 1-year history for ROC.")
+        log.warning("No stocks passed the Annual ROC filter.")
         return roc_df
 
     filtered = roc_df[roc_df["ROC_annual"] >= roc_filter].copy()
     total = prices_df["symbol"].nunique()
-    log.info(f"  Skipped (< 1yr history) : {total - len(roc_df):,} symbols")
+    log.info(f"  Skipped (insufficient history) : {total - len(roc_df):,} symbols")
     log.info(f"  Skipped (ROC < {roc_filter}%)  : {len(roc_df) - len(filtered):,} stocks")
     log.info(f"  Passed ROC filter       : {len(filtered):,} symbols")
     return filtered
@@ -195,8 +224,9 @@ def compute_and_filter_turnover(prices_df, symbols, turnover_filter_cr=TURNOVER_
     results = []
 
     for symbol, grp in subset.groupby("symbol"):
+        # We still use last 252 trading days for median turnover
         grp = grp.sort_values("date").tail(252)
-        if len(grp) < 252:
+        if len(grp) < 100: # Reduced from 252 to be more flexible, but 252 is standard for a year
             continue
         closes = grp["close"].values.astype(float)
         volumes = grp["volume"].values.astype(float)
@@ -221,9 +251,7 @@ def compute_and_filter_turnover(prices_df, symbols, turnover_filter_cr=TURNOVER_
     return filtered
 
 
-def compute_sharpe_vectorised(prices_df, symbols, long_months=6, short_months=3):
-    long_days = months_to_trading_days(long_months)
-    short_days = months_to_trading_days(short_months)
+def compute_sharpe_vectorised(prices_df, symbols, snapshot_date, long_months=6, short_months=3):
     log.info(
         f"Step 6 -- Computing Sharpe ratios for {len(symbols):,} symbols "
         f"({long_months}M / {short_months}M) ..."
@@ -232,51 +260,68 @@ def compute_sharpe_vectorised(prices_df, symbols, long_months=6, short_months=3)
     t0 = time.time()
     results = []
     skipped = 0
+    
+    # Target dates
+    target_long = pd.to_datetime(snapshot_date) - pd.DateOffset(months=long_months)
+    target_short = pd.to_datetime(snapshot_date) - pd.DateOffset(months=short_months)
+    
+    # Ensure date is datetime
+    if not pd.api.types.is_datetime64_any_dtype(prices_df["date"]):
+        prices_df["date"] = pd.to_datetime(prices_df["date"])
+        
     subset = prices_df[prices_df["symbol"].isin(symbols)]
 
-    for symbol, closes in subset.groupby("symbol")["close"]:
-        prices = closes.values.astype(float)
+    for symbol, df in subset.groupby("symbol"):
+        df = df.sort_values("date")
+        prices = df["close"].values.astype(float)
+        latest_price = prices[-1]
 
-        sharpe_6 = None
-        if len(prices) >= DAYS_TO_LOAD and len(prices) >= long_days + 1:
-            window = prices[-(long_days + 1):]
-            returns = np.diff(window) / window[:-1]
-            std = returns.std(ddof=1)
-            sharpe_6 = round(returns.mean() / std, 4) if std > 0 else None
+        # Long window Sharpe and ROC
+        sharpe_long = None
+        roc_long = None
+        
+        base_price_l, base_date_l = get_price_at_date(df, target_long)
+        if base_price_l and base_price_l > 0 and (base_date_l - target_long).days <= 15:
+            # Get window of prices from base_date to end
+            window_df = df[df["date"] >= base_date_l]
+            window_prices = window_df["close"].values.astype(float)
+            if len(window_prices) > 2:
+                returns = np.diff(window_prices) / window_prices[:-1]
+                std = returns.std(ddof=1)
+                sharpe_long = round(returns.mean() / std, 4) if std > 0 else None
+                roc_long = round((latest_price - base_price_l) / base_price_l * 100, 2)
 
-        sharpe_3 = None
-        if len(prices) >= DAYS_TO_LOAD and len(prices) >= short_days + 1:
-            window = prices[-(short_days + 1):]
-            returns = np.diff(window) / window[:-1]
-            std = returns.std(ddof=1)
-            sharpe_3 = round(returns.mean() / std, 4) if std > 0 else None
+        # Short window Sharpe and ROC
+        sharpe_short = None
+        roc_short = None
+        
+        base_price_s, base_date_s = get_price_at_date(df, target_short)
+        if base_price_s and base_price_s > 0 and (base_date_s - target_short).days <= 10:
+            window_df = df[df["date"] >= base_date_s]
+            window_prices = window_df["close"].values.astype(float)
+            if len(window_prices) > 2:
+                returns = np.diff(window_prices) / window_prices[:-1]
+                std = returns.std(ddof=1)
+                sharpe_short = round(returns.mean() / std, 4) if std > 0 else None
+                roc_short = round((latest_price - base_price_s) / base_price_s * 100, 2)
 
-        if sharpe_6 is None and sharpe_3 is None:
+        if sharpe_long is None and sharpe_short is None:
             skipped += 1
             continue
 
-        roc_short = None
-        if len(prices) >= short_days + 1 and prices[-(short_days + 1)] > 0:
-            base = prices[-(short_days + 1)]
-            roc_short = round((prices[-1] - base) / base * 100, 2)
-
-        roc_long = None
-        if len(prices) >= long_days + 1 and prices[-(long_days + 1)] > 0:
-            base = prices[-(long_days + 1)]
-            roc_long = round((prices[-1] - base) / base * 100, 2)
-
         week_52_high = None
+        # Use approx 252 trading days for 52W high
         if len(prices) >= TRADING_DAYS_52W:
             week_52_high = round(float(np.max(prices[-TRADING_DAYS_52W:])), 2)
 
         away_52wh = None
         if week_52_high and week_52_high > 0:
-            away_52wh = round((prices[-1] - week_52_high) / week_52_high * 100, 2)
+            away_52wh = round((latest_price - week_52_high) / week_52_high * 100, 2)
 
         results.append({
             "symbol": symbol,
-            "sharpe_6": sharpe_6,
-            "sharpe_3": sharpe_3,
+            "sharpe_6": sharpe_long,
+            "sharpe_3": sharpe_short,
             "ROC_6": roc_long,
             "ROC_3": roc_short,
             "week_52_high": week_52_high,
@@ -358,9 +403,8 @@ def run_screener(
         raise ValueError("Sharpe month windows cannot exceed 12.")
 
     t_start = time.time()
-    long_days = months_to_trading_days(long_months)
-    short_days = months_to_trading_days(short_months)
-    days_to_load = max(DAYS_TO_LOAD, long_days + 1, short_days + 1)
+    # Ensure we load enough days for 12 months + buffer for "next available date"
+    days_to_load = DAYS_TO_LOAD 
 
     log.info("")
     log.info("=" * 60)
@@ -374,7 +418,7 @@ def run_screener(
     log.info(f"  Median Turnover : >= Rs.{turnover_filter} Cr / day")
     log.info(f"  Sharpe windows  : {long_months}M and {short_months}M")
     log.info(f"  Sharpe formula  : mean(r) / std(r)  [no sqrt(252)]")
-    log.info(f"  Price window    : last {days_to_load} trading days")
+    log.info(f"  Date Logic      : Exact Date or Next Available (Calendar)")
     log.info("")
 
     with get_connection() as conn:
@@ -382,7 +426,7 @@ def run_screener(
         snapshot_df, latest_date = load_mcap_snapshot(conn, as_of_date=as_of_date)
         mcap_df = apply_mcap_filter(snapshot_df, mcap_filter)
         if mcap_df.empty:
-            return pd.DataFrame(), None
+            return pd.DataFrame(), None, None
         prices_df = load_price_history(
             conn,
             mcap_df["symbol"].tolist(),
@@ -392,12 +436,12 @@ def run_screener(
 
     if prices_df.empty:
         log.warning("No price history found.")
-        return pd.DataFrame(), None
+        return pd.DataFrame(), None, None
 
-    roc_df = compute_and_filter_roc(prices_df, roc_filter)
+    roc_df = compute_and_filter_roc(prices_df, latest_date, roc_filter)
     if roc_df.empty:
         log.warning(f"No stocks passed Annual ROC >= {roc_filter}% filter.")
-        return pd.DataFrame(), None
+        return pd.DataFrame(), None, None
 
     turnover_df = compute_and_filter_turnover(
         prices_df, roc_df["symbol"].tolist(), turnover_filter
@@ -406,29 +450,26 @@ def run_screener(
         log.warning(
             f"No stocks passed Median Turnover >= Rs.{turnover_filter} Cr filter."
         )
-        return pd.DataFrame(), None
+        return pd.DataFrame(), None, None
 
     sharpe_df = compute_sharpe_vectorised(
         prices_df,
         turnover_df["symbol"].tolist(),
+        latest_date,
         long_months=long_months,
         short_months=short_months,
     )
     if sharpe_df.empty:
         log.warning("No stocks had sufficient history for Sharpe.")
-        return pd.DataFrame(), None
+        return pd.DataFrame(), None, None
 
-    circuit_df = compute_circuit_hits(prices_df, sharpe_df["symbol"].tolist())
-
-    log.info("Step 8 -- Merging and ranking ...")
+    log.info("Step 7 -- Merging and ranking ...")
     result = (
         mcap_df
         .merge(roc_df, on="symbol", how="inner")
         .merge(turnover_df, on="symbol", how="inner")
         .merge(sharpe_df, on="symbol", how="inner")
-        .merge(circuit_df, on="symbol", how="left")
     )
-    result["total_circuit_hits_3m"] = result["total_circuit_hits_3m"].fillna(0).astype(int)
     log.info(f"  Pool before ranking : {len(result):,} stocks")
 
     result = rank_stocks(result)
@@ -445,7 +486,6 @@ def run_screener(
         "week_52_high", "market_cap_cr", "ROC_annual",
         "median_turnover_cr",
         "sharpe_6_rank", "sharpe_3_rank",
-        "total_circuit_hits_3m",
         "isin", "shares_outstanding",
     ]
     result = result[[c for c in output_cols if c in result.columns]]
@@ -454,7 +494,7 @@ def run_screener(
     log.info(f"  Final ranked list : {len(result):,} stocks")
     log.info(f"  Total time        : {elapsed:.1f}s")
     log.info("")
-    return result, latest_date
+    return result, latest_date, prices_df
 
 
 HEADER_FILL = PatternFill("solid", start_color="1F4E79")
@@ -620,7 +660,7 @@ def apply_filtered_workbook(df):
     return filtered.reset_index(drop=True)
 
 
-def export_to_excel(result, latest_date):
+def export_to_excel(result, latest_date, prices_df):
     base = Path(__file__).parent
     filename = f"{latest_date}.xlsx"
     out_path = base / filename
@@ -635,6 +675,20 @@ def export_to_excel(result, latest_date):
     friendly_headers["sharpe_6_rank"] = f"Sharpe {long_months}M Rank"
     friendly_headers["sharpe_3_rank"] = f"Sharpe {short_months}M Rank"
     friendly_headers["Avg_sharpe_6_3_Rank"] = f"Avg Sharpe {long_months}M/{short_months}M Rank"
+
+    # Compute circuit hits for all ranked stocks
+    log.info("Computing circuit hits for export...")
+    circuit_df = compute_circuit_hits(prices_df, result["symbol"].tolist())
+    result = result.merge(circuit_df, on="symbol", how="left")
+    result["total_circuit_hits_3m"] = result["total_circuit_hits_3m"].fillna(0).astype(int)
+
+    # Reorder columns to include circuit hits in a good spot
+    cols = list(result.columns)
+    if "total_circuit_hits_3m" in cols:
+        # Move it before ISIN/Shares OS
+        base_cols = [c for c in cols if c not in ["total_circuit_hits_3m", "isin", "shares_outstanding"]]
+        ordered_cols = base_cols + ["total_circuit_hits_3m", "isin", "shares_outstanding"]
+        result = result[ordered_cols]
 
     wb = Workbook()
     ws1 = wb.active
@@ -794,7 +848,7 @@ def main():
         print("Invalid Sharpe month values. Maximum allowed is 12.")
         return
 
-    result, latest_date = run_screener(
+    result, latest_date, prices_df = run_screener(
         mcap_filter=mcap_filter,
         roc_filter=roc_filter,
         turnover_filter=turnover_filter,
@@ -810,7 +864,7 @@ def main():
         roc_filter=roc_filter,
         turnover_filter=turnover_filter,
     )
-    export_to_excel(result, latest_date)
+    export_to_excel(result, latest_date, prices_df)
 
 
 if __name__ == "__main__":

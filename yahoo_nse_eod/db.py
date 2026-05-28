@@ -219,19 +219,34 @@ def upsert_symbols(conn, records):
 
 
 def mark_missing_symbols_inactive(conn, active_symbols):
-    placeholders = ",".join("?" for _ in active_symbols) or "''"
+    """
+    Marks symbols not in the active_symbols list as inactive.
+    Uses a temporary table to avoid SQLite's max variable limit for IN clauses.
+    """
+    if not active_symbols:
+        conn.execute("UPDATE symbols SET active = 0, status = 'inactive'")
+        conn.commit()
+        return
+
+    # Create temporary table for comparison
+    conn.execute("CREATE TEMP TABLE temp_active_symbols (symbol TEXT PRIMARY KEY)")
+    conn.executemany(
+        "INSERT INTO temp_active_symbols (symbol) VALUES (?)",
+        [(s,) for s in active_symbols]
+    )
+
     conn.execute(
-        f"""
+        """
         UPDATE symbols
         SET active = 0,
             status = CASE
                 WHEN status = 'renamed' THEN status
                 ELSE 'inactive'
             END
-        WHERE symbol NOT IN ({placeholders})
-        """,
-        tuple(active_symbols),
+        WHERE symbol NOT IN (SELECT symbol FROM temp_active_symbols)
+        """
     )
+    conn.execute("DROP TABLE temp_active_symbols")
     conn.commit()
 
 
@@ -342,6 +357,15 @@ def upsert_adjusted_prices(conn, df):
         data,
     )
     conn.commit()
+
+
+def load_corporate_actions(conn, symbol):
+    """Load split/bonus records for a symbol."""
+    return pd.read_sql(
+        "SELECT ex_date as date, action_type, value FROM corporate_actions WHERE symbol = ? AND action_type IN ('split', 'bonus')",
+        conn,
+        params=[symbol],
+    )
 
 
 def save_market_caps(conn, df):

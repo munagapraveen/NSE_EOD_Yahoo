@@ -11,6 +11,7 @@ from db import (
     get_connection,
     load_raw_prices,
     load_share_history,
+    load_corporate_actions,
     replace_adjusted_prices,
     save_indicators,
     save_market_caps,
@@ -28,15 +29,74 @@ def truncate_to_2dp(value):
     return float(Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_DOWN))
 
 
-def build_split_adjusted(df):
+def build_split_adjusted(df, actions=None):
     if df.empty:
         return df
 
     work = df.copy()
-    work["stock_splits"] = pd.to_numeric(work["stock_splits"], errors="coerce").fillna(0.0)
+    work["date"] = pd.to_datetime(work["date"])
+    work = work.sort_values("date")
+
+    # 1. Initialize split factor column
+    # Yahoo's 'stock_splits' column in the 'work' dataframe is now completely ignored.
+    work["stock_splits"] = 1.0
+    
+    # 2. POPULATE exclusively with verified corporate actions (from NSE)
+    if actions is not None and not actions.empty:
+        actions = actions.copy()
+        actions["date"] = pd.to_datetime(actions["date"])
+        
+        # Match actions to our price dates
+        for row in actions.itertuples():
+            # Find the exact date or closest following trading date
+            matches = work[work["date"] >= row.date]
+            if not matches.empty:
+                target_idx = matches.index[0]
+                actual_dt = work.loc[target_idx, "date"].strftime("%Y-%m-%d")
+                log.info(f"Applying verified NSE {row.action_type} {row.value} for {work.loc[target_idx, 'symbol']} on {actual_dt}")
+                # MULTIPLY if there are multiple actions on the same day
+                work.loc[target_idx, "stock_splits"] *= row.value
+
+    # 3. Double-check NSE splits against raw price action for sanity
+    prev_close = work["close"].shift(1)
+    raw_ratio = work["close"] / prev_close
+    
+    split_indices = work[(work["stock_splits"] > 1.0)].index
+    
+    for idx in split_indices:
+        split = work.loc[idx, "stock_splits"]
+        ratio = raw_ratio.loc[idx]
+        symbol = work.loc[idx, "symbol"]
+        dt = work.loc[idx, "date"].strftime("%Y-%m-%d")
+        
+        if pd.notna(ratio) and ratio > 0:
+            expected_ratio = 1.0 / split
+            # Even for NSE data, we verify if the price actually moved.
+            # If it didn't move as expected but stayed near 1.0, it's likely pre-adjusted by the provider.
+            if abs(ratio - 1.0) < abs(ratio - expected_ratio):
+                log.info(
+                    f"Detected likely pre-adjusted prices for {symbol} on {dt} (Ratio {ratio:.2f}). "
+                    f"Un-adjusting raw data before this date to compensate for split {split}."
+                )
+                # Un-adjust all prices PRIOR to this split date
+                # Use positional indexing to be safe with the sorted dataframe
+                idx_pos = work.index.get_loc(idx)
+                if idx_pos > 0:
+                    for col in ["open", "high", "low", "close"]:
+                        work.iloc[:idx_pos, work.columns.get_loc(col)] *= split
+                    work.iloc[:idx_pos, work.columns.get_loc("volume")] /= split
+                # We KEEP the stock_splits value so the cumulative split_factor calculation 
+                # correctly adjusts the shares and provides a consistent history.
+            else:
+                log.info(f"Verified NSE split {split} for {symbol} on {dt}")
+
+    # 4. Calculate cumulative split factor
     split_multiplier = work["stock_splits"].replace(0.0, 1.0)
+    # Price factor: product of splits AFTER this date
     future_factor = split_multiplier.iloc[::-1].cumprod().iloc[::-1].shift(-1, fill_value=1.0)
     work["split_factor"] = future_factor.astype(float)
+    # Share factor: product of splits ON OR AFTER this date
+    work["share_factor"] = (work["split_factor"] * split_multiplier).astype(float)
 
     for price_col in ["open", "high", "low", "close"]:
         work[price_col] = (
@@ -59,7 +119,7 @@ def build_split_adjusted(df):
 
     return work[
         [
-            "symbol", "date", "open", "high", "low", "close", "volume", "split_factor",
+            "symbol", "date", "open", "high", "low", "close", "volume", "split_factor", "share_factor",
             "shares_outstanding", "market_cap_cr",
             "ma_5", "ma_10", "ma_20", "ma_50", "ma_100", "ma_200",
         ]
@@ -107,10 +167,55 @@ def attach_market_cap(adjusted_df, share_df):
     merged["shares_outstanding"] = merged["shares_outstanding"].fillna(
         shares["shares_outstanding"].iloc[0]
     )
-    merged["shares_outstanding"] = (
-        pd.to_numeric(merged["shares_outstanding"], errors="coerce") *
-        pd.to_numeric(merged["split_factor"], errors="coerce")
-    )
+    
+    # Smart Share Adjustment: Detect if raw shares are already post-split on the split day
+    # OR if the adjustment is delayed by a few days (common on Yahoo Finance)
+    raw_shares_series = pd.to_numeric(merged["shares_outstanding"], errors="coerce")
+    final_shares = []
+    
+    # Pre-calculate known delayed jumps
+    delayed_jumps = {} # {split_date_obj: jump_detected_idx}
+    for row in merged.itertuples():
+        s_factor = float(row.share_factor)
+        p_factor = float(row.split_factor)
+        split_today = s_factor / p_factor if p_factor > 0 else 1.0
+        if split_today > 1.1:
+            lookahead = merged.loc[row.Index : row.Index + 7]
+            for next_row in lookahead.itertuples():
+                if next_row.Index == 0: continue
+                prev_val = float(merged.loc[next_row.Index - 1, "shares_outstanding"])
+                if prev_val > 0 and abs(float(next_row.shares_outstanding) / prev_val - split_today) < abs(float(next_row.shares_outstanding) / prev_val - 1.0):
+                    delayed_jumps[row.date] = next_row.Index
+                    log.info(f"SMART SHARE: Delayed split jump for {row.symbol} on {next_row.date} (Split Date: {row.date})")
+                    break
+
+    for row in merged.itertuples():
+        current_raw_shares = float(row.shares_outstanding)
+        
+        # Logic: 
+        # 1. Start with split_factor (adjusts all historical splits AFTER today to current basis)
+        effective_factor = float(row.split_factor)
+        
+        # 2. For every split that has happened ON or BEFORE today:
+        # We need to decide if we also need to adjust TODAY'S raw shares for that specific split.
+        for split_date, jump_idx in delayed_jumps.items():
+            if row.date >= split_date:
+                if row.Index < jump_idx:
+                    # This split has 'happened' but isn't in raw shares yet.
+                    # SCALE UP.
+                    match_row = merged[merged["date"] == split_date].iloc[0]
+                    ratio = match_row.share_factor / match_row.split_factor
+                    effective_factor *= ratio
+                else:
+                    # This split IS in raw shares. No extra factor needed.
+                    pass
+            else:
+                # This split hasn't happened yet. Standard cumulative logic handles it.
+                pass
+        
+        final_shares.append(current_raw_shares * effective_factor)
+
+    merged["shares_outstanding"] = final_shares
     merged["market_cap_cr"] = (
         pd.to_numeric(merged["close"], errors="coerce") *
         pd.to_numeric(merged["shares_outstanding"], errors="coerce") / 1e7
@@ -168,7 +273,8 @@ def rebuild_symbols(symbols, preserve_market_cap=False):
     for idx, symbol in enumerate(symbols, start=1):
         with get_connection() as conn:
             raw = load_raw_prices(conn, symbol)
-            adjusted = build_split_adjusted(raw)
+            actions = load_corporate_actions(conn, symbol)
+            adjusted = build_split_adjusted(raw, actions=actions)
             if preserve_market_cap:
                 shares = load_share_history(conn, symbol)
                 adjusted = attach_market_cap(adjusted, shares)
@@ -197,7 +303,8 @@ def refresh_latest_rows(symbol_date_map):
     for idx, (symbol, changed_dates) in enumerate(items, start=1):
         with get_connection() as conn:
             raw = load_raw_prices(conn, symbol)
-            adjusted = build_split_adjusted(raw)
+            actions = load_corporate_actions(conn, symbol)
+            adjusted = build_split_adjusted(raw, actions=actions)
             shares = load_share_history(conn, symbol)
             adjusted = attach_market_cap(adjusted, shares)
             target_dates = {str(date_val) for date_val in changed_dates}

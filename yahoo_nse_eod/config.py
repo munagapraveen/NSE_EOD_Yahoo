@@ -15,14 +15,29 @@ FAILED_SHARES_FILE = DATA_DIR / "share_download_failures_latest.csv"
 FAILED_EOD_FILE = DATA_DIR / "eod_download_failures_latest.csv"
 
 YAHOO_SUFFIX = ".NS"
+
+# Major Indices Mapping (Zerodha/Common Name -> Yahoo Symbol)
+INDEX_MAP = {
+    "NIFTY 50": "^NSEI",
+    "NIFTY BANK": "^NSEBANK",
+    "NIFTY NEXT 50": "^NSMIDCP",
+    "NIFTY MIDCAP 50": "^NSEMDCP50",
+    "NIFTY 500": "^CRSLDX",
+    "NIFTY MIDCAP 100": "^NSEMDCP100",
+    "NIFTY SMALLCAP 100": "^NSESMLCP100",
+    "INDIA VIX": "^INDIAVIX",
+}
+
 DEFAULT_BATCH_SIZE = 75
 DEFAULT_LOOKBACK_DAYS = 7
 DEFAULT_HISTORY_START = "2024-01-01"
 
 NSE_REPORTS_URL = "https://www.nseindia.com/static/market-data/securities-available-for-trading"
 NSE_SYMBOL_PAGE_URL = "https://www.nseindia.com/static/market-data/securities-available-for-trading"
+NSE_CORP_ACTIONS_URL = "https://www.nseindia.com/api/corporates-corporateactions?index=equities"
 
 HTTP_HEADERS = {
+
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "

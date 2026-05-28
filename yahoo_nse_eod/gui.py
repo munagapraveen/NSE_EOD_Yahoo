@@ -31,7 +31,6 @@ TASKS = [
     ("Download Shares OS", "sync_share_counts.py", []),
     ("Build Adjusted Prices", "adjust_splits.py", []),
     ("Review Corporate Actions", "corporate_actions.py", []),
-    ("Detect Symbol Changes", "symbol_change_handler.py", []),
 ]
 
 TOOLTIPS = {
@@ -41,11 +40,8 @@ TOOLTIPS = {
     "Daily Price Refresh": "Append the latest available Yahoo EOD rows and update only the new dates.",
     "Review Corporate Actions": "Show stored split/dividend events and optionally rebuild affected symbols.",
     "Detect Symbol Changes": "Detect probable NSE ticker renames using NSE files and ISIN continuity.",
-    "Apply Symbol Changes": "Apply detected renames to stored symbol history and adjusted datasets.",
     "Retry Failed EOD Downloads": "Retry only the symbols listed in the latest failed-EOD report file.",
     "Run Screener": "Run the standalone Sharpe screener with current filters.",
-    "Latest Snapshot": "Query the latest adjusted row for many symbols.",
-    "Query Symbol": "Inspect one symbol's detailed performance history.",
 }
 
 class SectionCard(QGroupBox):
@@ -255,14 +251,39 @@ class YahooNSEGUI(QMainWindow):
             
         card.layout.addSpacing(5)
         
-        apply_btn = QPushButton("Apply Symbol Changes")
-        apply_btn.setFixedHeight(30)
-        apply_btn.setFixedWidth(200)
-        apply_btn.setStyleSheet("background-color: #7c3aed;")
-        apply_btn.setToolTip(TOOLTIPS["Apply Symbol Changes"])
-        apply_btn.setCursor(Qt.PointingHandCursor)
-        apply_btn.clicked.connect(lambda: self._run_script("symbol_change_handler.py", ["--apply"], "Apply Symbol Changes"))
-        card.layout.addWidget(apply_btn, 0, Qt.AlignCenter)
+        self.apply_changes_cb = QCheckBox("Auto-Apply Detected Changes")
+        self.apply_changes_cb.setChecked(True)
+        self.apply_changes_cb.setCursor(Qt.PointingHandCursor)
+        self.apply_changes_cb.setStyleSheet("""
+            QCheckBox {
+                color: #e2e8f0;
+                font-size: 11px;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                background-color: #334155;
+                border: 1px solid #475569;
+                border-radius: 4px;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #38bdf8;
+                image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjMiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBvbHlsaW5lIHBvaW50cz0iMjAgNiA5IDE3IDQgMTIiLz48L3N2Zz4=");
+            }
+            QCheckBox::indicator:hover {
+                border-color: #38bdf8;
+            }
+        """)
+        card.layout.addWidget(self.apply_changes_cb, 0, Qt.AlignCenter)
+
+        detect_btn = QPushButton("Detect Symbol Changes")
+        detect_btn.setFixedHeight(30)
+        detect_btn.setFixedWidth(200)
+        detect_btn.setToolTip(TOOLTIPS["Detect Symbol Changes"])
+        detect_btn.setCursor(Qt.PointingHandCursor)
+        detect_btn.clicked.connect(self._run_symbol_detection)
+        card.layout.addWidget(detect_btn, 0, Qt.AlignCenter)
 
         retry_btn = QPushButton("Retry Failures")
         retry_btn.setFixedHeight(30)
@@ -434,6 +455,14 @@ class YahooNSEGUI(QMainWindow):
         self.process.readyReadStandardOutput.connect(self._handle_output)
         self.process.finished.connect(lambda code, exit_status, l=label: self._handle_finished(code, exit_status, l))
         self.process.start(sys.executable, [str(BASE_DIR / script_name)] + args)
+
+    def _run_symbol_detection(self):
+        args = []
+        label = "Detect Symbol Changes"
+        if self.apply_changes_cb.isChecked():
+            args.append("--apply")
+            label = "Detect & Apply Symbol Changes"
+        self._run_script("symbol_change_handler.py", args, label)
 
     def _handle_output(self):
         data = self.process.readAllStandardOutput().data().decode()

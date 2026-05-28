@@ -76,27 +76,11 @@ def load_target_symbols(limit=None, only_symbols=None):
 
 
 def build_action_records(df):
-    records = []
-    for row in df.itertuples(index=False):
-        if pd.notna(row.stock_splits) and float(row.stock_splits) not in (0.0, 1.0):
-            records.append({
-                "symbol": row.symbol,
-                "ex_date": row.date,
-                "action_type": "split",
-                "value": float(row.stock_splits),
-                "source": "yahoo",
-                "note": "Derived from Yahoo historical actions",
-            })
-        if pd.notna(row.dividends) and float(row.dividends) != 0.0:
-            records.append({
-                "symbol": row.symbol,
-                "ex_date": row.date,
-                "action_type": "dividend",
-                "value": float(row.dividends),
-                "source": "yahoo",
-                "note": "Derived from Yahoo historical actions",
-            })
-    return records
+    """
+    Yahoo corporate actions (splits/dividends) are now ignored.
+    We rely solely on verified data from NSE synced via sync_corporate_actions.py.
+    """
+    return []
 
 
 def collect_touched_dates(history):
