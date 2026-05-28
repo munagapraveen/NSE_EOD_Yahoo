@@ -335,10 +335,18 @@ def upsert_adjusted_prices(conn, df):
     ]
     
     # Explicitly convert to tuples and replace NAType/NaN with None
-    data = [
-        tuple(None if pd.isna(v) else v for v in row)
-        for row in df[cols].itertuples(index=False, name=None)
-    ]
+    # Ensure date is string to avoid Timestamp binding error
+    data = []
+    for row in df[cols].itertuples(index=False, name=None):
+        clean_row = []
+        for i, v in enumerate(row):
+            if pd.isna(v):
+                clean_row.append(None)
+            elif cols[i] == "date" and hasattr(v, "strftime"):
+                clean_row.append(v.strftime("%Y-%m-%d"))
+            else:
+                clean_row.append(v)
+        data.append(tuple(clean_row))
 
     conn.executemany(
         """

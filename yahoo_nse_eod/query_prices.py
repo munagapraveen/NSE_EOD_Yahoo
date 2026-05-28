@@ -30,6 +30,7 @@ def parse_args(args):
         "to_date": None,
         "limit": 50,
         "csv": None,
+        "excel": None,
         "columns": DEFAULT_COLUMNS,
         "latest_only": False,
     }
@@ -55,6 +56,10 @@ def parse_args(args):
             continue
         if arg == "--csv" and i + 1 < len(args):
             options["csv"] = args[i + 1].strip()
+            i += 2
+            continue
+        if arg == "--excel" and i + 1 < len(args):
+            options["excel"] = args[i + 1].strip()
             i += 2
             continue
         if arg == "--columns" and i + 1 < len(args):
@@ -147,6 +152,12 @@ def main():
     if options["csv"]:
         out_path = Path(options["csv"]).expanduser()
         df.to_csv(out_path, index=False)
+        print(f"Saved {len(df):,} rows to {out_path}")
+        return
+
+    if options["excel"]:
+        out_path = Path(options["excel"]).expanduser()
+        df.to_excel(out_path, index=False)
         print(f"Saved {len(df):,} rows to {out_path}")
         return
 

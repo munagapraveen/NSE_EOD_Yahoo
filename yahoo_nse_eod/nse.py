@@ -148,3 +148,25 @@ def fetch_securities_master():
     df["series"] = df["series"].fillna("").astype(str).str.strip().str.upper()
     
     return df
+
+
+def fetch_etf_master():
+    df = _fetch_csv_from_page(
+        NSE_SYMBOL_PAGE_URL,
+        r"list of etfs",
+    )
+    cols = {str(c).strip().upper(): c for c in df.columns}
+    rename = {}
+    for src, target in [
+        ("SYMBOL", "symbol"),
+        ("COMPANY NAME", "company_name"),
+        ("ISIN", "isin"),
+    ]:
+        if src in cols:
+            rename[cols[src]] = target
+    df = df.rename(columns=rename)
+    df["series"] = "EQ"  # ETFs are traded like EQ
+    required = ["symbol", "company_name", "isin", "series"]
+    df = df[[c for c in required if c in df.columns]].copy()
+    df["symbol"] = df["symbol"].astype(str).str.strip().str.upper()
+    return df

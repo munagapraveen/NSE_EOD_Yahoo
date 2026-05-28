@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QTextEdit, QFrame, QScrollArea, QGroupBox,
     QLineEdit, QDateEdit, QGridLayout, QSpacerItem, QSizePolicy,
-    QToolBar, QStatusBar, QCheckBox
+    QToolBar, QStatusBar, QCheckBox, QFileDialog
 )
 from PySide6.QtCore import Qt, QProcess, QTimer, QSize, QDate
 from PySide6.QtGui import QFont, QIcon, QColor, QTextCursor
@@ -62,10 +62,12 @@ class YahooNSEGUI(QMainWindow):
         super().__init__()
         self.setWindowTitle("Yahoo NSE EOD Dashboard")
         self.resize(1150, 800) # Slightly smaller default size
-        
         self.process = None
         self.task_queue = []
+        self.last_query_args = None
+
         self._init_ui()
+
         
         # Stats Timer
         self.stats_timer = QTimer(self)
@@ -95,8 +97,8 @@ class YahooNSEGUI(QMainWindow):
 
         self._build_tasks_section()
         self._build_sharpe_section()
-        self._build_snapshot_section()
         self._build_query_section()
+        self._build_snapshot_section()
         
         self.sidebar_layout.addStretch()
         sidebar_scroll.setWidget(sidebar_content)
@@ -418,6 +420,14 @@ class YahooNSEGUI(QMainWindow):
         btn.setStyleSheet("background-color: #1d4ed8;")
         btn.clicked.connect(self._run_query)
         card.layout.addWidget(btn, 0, Qt.AlignCenter)
+
+        self.export_query_btn = QPushButton("Export to Excel")
+        self.export_query_btn.setFixedHeight(32)
+        self.export_query_btn.setFixedWidth(200)
+        self.export_query_btn.setCursor(Qt.PointingHandCursor)
+        self.export_query_btn.setEnabled(False)
+        self.export_query_btn.clicked.connect(self._run_export_query)
+        card.layout.addWidget(self.export_query_btn, 0, Qt.AlignCenter)
         
         self.sidebar_layout.addWidget(card)
 
@@ -474,6 +484,10 @@ class YahooNSEGUI(QMainWindow):
         if exit_code == 0:
             self.status_label.setText(f"Done: {label}")
             self._log(f"\n[Success] {label} completed successfully.\n")
+            
+            if label.startswith("Query ") or label == "Latest Snapshot":
+                self.export_query_btn.setEnabled(True)
+                
             # If there are more tasks in the queue, process them
             if self.task_queue:
                 self._process_next_task()
@@ -559,6 +573,8 @@ class YahooNSEGUI(QMainWindow):
 
     def _run_snapshot(self):
         args = ["--latest", "--limit", self.snapshot_limit.text()]
+        self.last_query_args = args
+        self.export_query_btn.setEnabled(False)
         self._run_script("query_prices.py", args, "Latest Snapshot")
 
     def _run_query(self):
@@ -569,7 +585,22 @@ class YahooNSEGUI(QMainWindow):
         from_date = self.query_from.date().toString("yyyy-MM-dd")
         to_date = self.query_to.date().toString("yyyy-MM-dd")
         args = ["--symbol", symbol, "--limit", "5000", "--from", from_date, "--to", to_date]
+        self.last_query_args = args
+        self.export_query_btn.setEnabled(False)
         self._run_script("query_prices.py", args, f"Query {symbol}")
+
+    def _run_export_query(self):
+        if not self.last_query_args:
+            return
+            
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Query Results", "query_results.xlsx", "Excel Files (*.xlsx)"
+        )
+        if not file_path:
+            return
+            
+        args = self.last_query_args + ["--excel", file_path]
+        self._run_script("query_prices.py", args, "Exporting to Excel")
 
     def _retry_failed(self):
         if not FAILED_EOD_FILE.exists():
