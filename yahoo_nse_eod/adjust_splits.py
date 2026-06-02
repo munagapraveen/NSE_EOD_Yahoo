@@ -37,6 +37,9 @@ def build_split_adjusted(df, actions=None):
     work["date"] = pd.to_datetime(work["date"])
     work = work.sort_values("date")
 
+    # Cast volume to float to allow fractional intermediate math without LossySetitemError
+    work["volume"] = work["volume"].astype(float)
+
     # 1. Initialize split factor column
     # Yahoo's 'stock_splits' column in the 'work' dataframe is now completely ignored.
     work["stock_splits"] = 1.0
@@ -117,6 +120,9 @@ def build_split_adjusted(df, actions=None):
     work["shares_outstanding"] = None
     work["market_cap_cr"] = None
 
+    # Round volume for storage
+    work["volume"] = work["volume"].round()
+
     return work[
         [
             "symbol", "date", "open", "high", "low", "close", "volume", "split_factor", "share_factor",
@@ -138,8 +144,11 @@ def attach_market_cap(adjusted_df, share_df):
         return adjusted_df
 
     work = adjusted_df.copy()
+    work["date"] = pd.to_datetime(work["date"])
+
     if share_df.empty:
-        # Ensure any placeholders are converted to None for SQLite
+        # Convert to string for SQLite safety even in early return
+        work["date"] = work["date"].dt.strftime("%Y-%m-%d")
         return work.where(pd.notnull(work), None)
 
     shares = share_df.copy()
@@ -272,20 +281,22 @@ def rebuild_symbols(symbols, preserve_market_cap=False):
 
     for idx, symbol in enumerate(symbols, start=1):
         with get_connection() as conn:
-            raw = load_raw_prices(conn, symbol)
-            actions = load_corporate_actions(conn, symbol)
-            adjusted = build_split_adjusted(raw, actions=actions)
-            if preserve_market_cap:
-                shares = load_share_history(conn, symbol)
-                adjusted = attach_market_cap(adjusted, shares)
-                existing_market_caps = load_adjusted_market_caps(conn, symbol)
-                adjusted = preserve_existing_market_cap(adjusted, existing_market_caps)
-            else:
-                shares = load_share_history(conn, symbol)
-                adjusted = attach_market_cap(adjusted, shares)
-            replace_adjusted_prices(conn, symbol, adjusted)
-            save_indicators(conn, adjusted)
-            save_market_caps(conn, adjusted)
+            with conn:  # Transaction starts here
+                raw = load_raw_prices(conn, symbol)
+                actions = load_corporate_actions(conn, symbol)
+                adjusted = build_split_adjusted(raw, actions=actions)
+                if preserve_market_cap:
+                    shares = load_share_history(conn, symbol)
+                    adjusted = attach_market_cap(adjusted, shares)
+                    existing_market_caps = load_adjusted_market_caps(conn, symbol)
+                    adjusted = preserve_existing_market_cap(adjusted, existing_market_caps)
+                else:
+                    shares = load_share_history(conn, symbol)
+                    adjusted = attach_market_cap(adjusted, shares)
+                
+                replace_adjusted_prices(conn, symbol, adjusted)
+                save_indicators(conn, adjusted)
+                save_market_caps(conn, adjusted)
         log.info(
             f"[{idx}/{len(symbols)}] rebuilt split-adjusted history, market cap, and moving averages for {symbol}"
         )
@@ -307,7 +318,12 @@ def refresh_latest_rows(symbol_date_map):
             adjusted = build_split_adjusted(raw, actions=actions)
             shares = load_share_history(conn, symbol)
             adjusted = attach_market_cap(adjusted, shares)
-            target_dates = {str(date_val) for date_val in changed_dates}
+            
+            # Ensure adjusted['date'] is string and target_dates format matches
+            adjusted["date"] = adjusted["date"].astype(str)
+            target_dates = {
+                pd.to_datetime(d).strftime("%Y-%m-%d") for d in changed_dates
+            }
             subset = adjusted[adjusted["date"].isin(target_dates)].copy()
             upsert_adjusted_prices(conn, subset)
             save_indicators(conn, subset)

@@ -5,12 +5,12 @@ Design note:
     from Yahoo. Once a trading date is materialized into `adjusted_eod_prices`,
     the authoritative historical market-cap series is:
 
-        adjusted_eod_prices.market_cap_cr
+        marketcap.market_cap_cr
 
     For brand-new dates, market cap is derived from `share_history`.
     For historical corporate-action rebuilds, previously stored
     `market_cap_cr` is preserved by date and `shares_outstanding` inside
-    `adjusted_eod_prices` is adjusted to remain consistent with the refreshed
+    `marketcap` is adjusted to remain consistent with the refreshed
     adjusted close.
 """
 
@@ -49,6 +49,7 @@ def setup_schema(conn):
             company_name      TEXT,
             isin              TEXT,
             series            TEXT,
+            instrument_type   TEXT NOT NULL DEFAULT 'STOCK',
             active            INTEGER NOT NULL DEFAULT 1,
             status            TEXT NOT NULL DEFAULT 'active',
             last_seen_date    TEXT,
@@ -58,6 +59,14 @@ def setup_schema(conn):
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_symbols_isin ON symbols(isin)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_symbols_active ON symbols(active)")
+
+    # Migration for instrument_type
+    existing_symbols_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(symbols)")
+    }
+    if "instrument_type" not in existing_symbols_cols:
+        conn.execute("ALTER TABLE symbols ADD COLUMN instrument_type TEXT NOT NULL DEFAULT 'STOCK'")
+        log.info("Added instrument_type column to symbols table")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS symbol_aliases (
@@ -99,13 +108,14 @@ def setup_schema(conn):
             high              REAL,
             low               REAL,
             close             REAL,
-            volume            REAL,
+            volume            INTEGER,
             split_factor      REAL NOT NULL,
             adjusted_at       TEXT DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (symbol, date)
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_adj_eod_symbol_date ON adjusted_eod_prices(symbol, date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_adj_eod_date ON adjusted_eod_prices(date)")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS marketcap (
@@ -117,6 +127,7 @@ def setup_schema(conn):
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_marketcap_symbol_date ON marketcap(symbol, date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_marketcap_date ON marketcap(date)")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS share_history (
@@ -158,6 +169,7 @@ def setup_schema(conn):
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_indicators_symbol_date ON indicators(symbol, date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_indicators_date ON indicators(date)")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS download_runs (
@@ -198,10 +210,10 @@ def setup_schema(conn):
 def upsert_symbols(conn, records):
     conn.executemany("""
         INSERT INTO symbols (
-            symbol, yahoo_symbol, company_name, isin, series,
+            symbol, yahoo_symbol, company_name, isin, series, instrument_type,
             active, status, last_seen_date, source, last_synced_at
         ) VALUES (
-            :symbol, :yahoo_symbol, :company_name, :isin, :series,
+            :symbol, :yahoo_symbol, :company_name, :isin, :series, :instrument_type,
             :active, :status, :last_seen_date, :source, :last_synced_at
         )
         ON CONFLICT(symbol) DO UPDATE SET
@@ -209,6 +221,7 @@ def upsert_symbols(conn, records):
             company_name=excluded.company_name,
             isin=excluded.isin,
             series=excluded.series,
+            instrument_type=excluded.instrument_type,
             active=excluded.active,
             status=excluded.status,
             last_seen_date=excluded.last_seen_date,
@@ -252,7 +265,7 @@ def mark_missing_symbols_inactive(conn, active_symbols):
 
 def get_active_symbols(conn):
     return pd.read_sql("""
-        SELECT symbol, yahoo_symbol, company_name, isin, series
+        SELECT symbol, yahoo_symbol, company_name, isin, series, instrument_type
         FROM symbols
         WHERE active = 1
         ORDER BY symbol
@@ -344,6 +357,11 @@ def upsert_adjusted_prices(conn, df):
                 clean_row.append(None)
             elif cols[i] == "date" and hasattr(v, "strftime"):
                 clean_row.append(v.strftime("%Y-%m-%d"))
+            elif cols[i] == "volume" and v is not None:
+                try:
+                    clean_row.append(int(v))
+                except:
+                    clean_row.append(v)
             else:
                 clean_row.append(v)
         data.append(tuple(clean_row))
@@ -502,7 +520,7 @@ def load_adjusted_market_caps(conn, symbol):
 
 def load_active_symbol_map(conn):
     return pd.read_sql("""
-        SELECT symbol, isin, company_name, yahoo_symbol, status, active
+        SELECT symbol, isin, company_name, yahoo_symbol, status, active, instrument_type
         FROM symbols
         ORDER BY symbol
     """, conn)
@@ -524,6 +542,11 @@ def upsert_symbol_aliases(conn, records):
 
 
 def apply_symbol_rename(conn, old_symbol, new_symbol, effective_date=None, source="nse", note=""):
+    cutoff_date = effective_date or None
+
+    def should_overwrite_existing(row_date):
+        return cutoff_date is not None and str(row_date) < str(cutoff_date)
+
     for table in [
         "raw_eod_prices",
         "adjusted_eod_prices",
@@ -547,10 +570,24 @@ def apply_symbol_rename(conn, old_symbol, new_symbol, effective_date=None, sourc
             date_idx = cols.index("date")
             placeholders = ",".join("?" for _ in cols)
             for row in rows:
-                if row[date_idx] in existing_dates:
-                    continue
                 mutable = list(row)
                 mutable[symbol_idx] = new_symbol
+                if row[date_idx] in existing_dates:
+                    if should_overwrite_existing(row[date_idx]):
+                        assignments = ",".join(
+                            f"{col}=excluded.{col}"
+                            for col in cols
+                            if col not in {"symbol", "date"}
+                        )
+                        conn.execute(
+                            f"""
+                            INSERT INTO {table} VALUES ({placeholders})
+                            ON CONFLICT(symbol, date) DO UPDATE SET
+                                {assignments}
+                            """,
+                            mutable,
+                        )
+                    continue
                 conn.execute(
                     f"INSERT OR IGNORE INTO {table} VALUES ({placeholders})",
                     mutable,
@@ -566,14 +603,27 @@ def apply_symbol_rename(conn, old_symbol, new_symbol, effective_date=None, sourc
         (old_symbol,),
     ).fetchall()
     for ex_date, action_type, value, src, row_note in action_rows:
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO corporate_actions (
-                symbol, ex_date, action_type, value, source, note
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (new_symbol, ex_date, action_type, value, src, row_note),
-        )
+        if should_overwrite_existing(ex_date):
+            conn.execute(
+                """
+                INSERT INTO corporate_actions (
+                    symbol, ex_date, action_type, value, source, note
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol, ex_date, action_type, source) DO UPDATE SET
+                    value=excluded.value,
+                    note=excluded.note
+                """,
+                (new_symbol, ex_date, action_type, value, src, row_note),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO corporate_actions (
+                    symbol, ex_date, action_type, value, source, note
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (new_symbol, ex_date, action_type, value, src, row_note),
+            )
     conn.execute("DELETE FROM corporate_actions WHERE symbol = ?", (old_symbol,))
     conn.execute(
         """

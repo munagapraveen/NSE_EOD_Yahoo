@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 import sys
 from unittest import mock
+import types
 
 import pandas as pd
 
@@ -10,16 +11,19 @@ TEST_DIR = Path(__file__).resolve().parent
 if str(TEST_DIR) not in sys.path:
     sys.path.insert(0, str(TEST_DIR))
 
-import download_os_share_history
+sys.modules.setdefault("yfinance", types.SimpleNamespace())
+
+import sync_share_counts as share_counts
 
 
 class DownloadSharesTests(unittest.TestCase):
     def test_parse_args(self):
-        options = download_os_share_history.parse_args(
-            ["--limit", "10", "--only-missing", "--sleep", "0.1", "--retry-sleep", "0.2", "--workers", "6"]
+        options = share_counts.parse_args(
+            ["--limit", "10", "--only-missing", "--start", "2025-01-01", "--sleep", "0.1", "--retry-sleep", "0.2", "--workers", "6"]
         )
         self.assertEqual(options["limit"], 10)
         self.assertTrue(options["only_missing"])
+        self.assertEqual(options["start"], "2025-01-01")
         self.assertEqual(options["sleep_secs"], 0.1)
         self.assertEqual(options["retry_sleep_secs"], 0.2)
         self.assertEqual(options["workers"], 6)
@@ -48,7 +52,7 @@ class DownloadSharesTests(unittest.TestCase):
         def fake_persist(records):
             persisted.extend(records)
 
-        summary = download_os_share_history.run_share_download(
+        summary = share_counts.run_share_download(
             symbols,
             workers=2,
             sleep_secs=0,
@@ -70,8 +74,8 @@ class DownloadSharesTests(unittest.TestCase):
             failed_rows = [
                 {"symbol": "AAA", "yahoo_symbol": "AAA.NS", "stage": "retry-failed", "error": "boom"}
             ]
-            with mock.patch.object(download_os_share_history, "FAILED_SHARES_FILE", report_path):
-                download_os_share_history.save_failure_report(failed_rows)
+            with mock.patch.object(share_counts, "FAILED_SHARES_FILE", report_path):
+                share_counts.save_failure_report(failed_rows)
 
             self.assertTrue(report_path.exists())
             content = report_path.read_text(encoding="utf-8")

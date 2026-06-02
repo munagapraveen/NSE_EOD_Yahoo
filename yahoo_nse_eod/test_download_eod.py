@@ -3,12 +3,16 @@ import unittest
 from pathlib import Path
 import sys
 from unittest import mock
+import types
 
 import pandas as pd
 
 TEST_DIR = Path(__file__).resolve().parent
 if str(TEST_DIR) not in sys.path:
     sys.path.insert(0, str(TEST_DIR))
+
+sys.modules.setdefault("yfinance", types.SimpleNamespace())
+sys.modules.setdefault("requests", types.SimpleNamespace())
 
 import download_eod
 
@@ -31,9 +35,7 @@ class DownloadEODTests(unittest.TestCase):
             {"symbol": "BBB", "date": "2025-01-02", "stock_splits": 0.0, "dividends": 1.5},
         ])
         actions = download_eod.build_action_records(history)
-        self.assertEqual(len(actions), 2)
-        self.assertEqual(actions[0]["action_type"], "split")
-        self.assertEqual(actions[1]["action_type"], "dividend")
+        self.assertEqual(actions, [])
 
     def test_download_with_retries_falls_back_to_single_symbol(self):
         batch = pd.DataFrame([

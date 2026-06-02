@@ -51,6 +51,7 @@ class ApplySymbolRenameTests(unittest.TestCase):
                 "company_name": "Old Co",
                 "isin": "INE123",
                 "series": "EQ",
+                "instrument_type": "STOCK",
                 "active": 1,
                 "status": "active",
                 "last_seen_date": "2025-01-01",
@@ -62,6 +63,7 @@ class ApplySymbolRenameTests(unittest.TestCase):
                 "company_name": "New Co",
                 "isin": "INE123",
                 "series": "EQ",
+                "instrument_type": "STOCK",
                 "active": 1,
                 "status": "active",
                 "last_seen_date": "2025-01-01",
@@ -95,6 +97,109 @@ class ApplySymbolRenameTests(unittest.TestCase):
             self.assertEqual(new_marketcap[0], 999.9)
             self.assertEqual(old_indicator, 0)
             self.assertEqual(old_marketcap, 0)
+        finally:
+            conn.close()
+
+    def test_apply_symbol_rename_uses_effective_date_for_overlap_resolution(self):
+        conn = sqlite3.connect(":memory:")
+        try:
+            db.setup_schema(conn)
+            db.upsert_symbols(conn, [{
+                "symbol": "OLDSYM",
+                "yahoo_symbol": "OLDSYM.NS",
+                "company_name": "Old Co",
+                "isin": "INE123",
+                "series": "EQ",
+                "instrument_type": "STOCK",
+                "active": 1,
+                "status": "active",
+                "last_seen_date": "2025-01-01",
+                "source": "test",
+                "last_synced_at": "2025-01-01",
+            }, {
+                "symbol": "NEWSYM",
+                "yahoo_symbol": "NEWSYM.NS",
+                "company_name": "New Co",
+                "isin": "INE123",
+                "series": "EQ",
+                "instrument_type": "STOCK",
+                "active": 1,
+                "status": "active",
+                "last_seen_date": "2025-01-01",
+                "source": "test",
+                "last_synced_at": "2025-01-01",
+            }])
+            old_rows = pd.DataFrame([
+                {
+                    "symbol": "OLDSYM",
+                    "date": "2025-01-01",
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 99.0,
+                    "close": 100.5,
+                    "volume": 1000.0,
+                    "split_factor": 1.0,
+                },
+                {
+                    "symbol": "OLDSYM",
+                    "date": "2025-01-03",
+                    "open": 103.0,
+                    "high": 104.0,
+                    "low": 102.0,
+                    "close": 103.5,
+                    "volume": 1200.0,
+                    "split_factor": 1.0,
+                },
+            ])
+            new_rows = pd.DataFrame([
+                {
+                    "symbol": "NEWSYM",
+                    "date": "2025-01-01",
+                    "open": 200.0,
+                    "high": 201.0,
+                    "low": 199.0,
+                    "close": 200.5,
+                    "volume": 2000.0,
+                    "split_factor": 1.0,
+                },
+                {
+                    "symbol": "NEWSYM",
+                    "date": "2025-01-03",
+                    "open": 300.0,
+                    "high": 301.0,
+                    "low": 299.0,
+                    "close": 300.5,
+                    "volume": 3000.0,
+                    "split_factor": 1.0,
+                },
+            ])
+            db.upsert_adjusted_prices(conn, old_rows)
+            db.upsert_adjusted_prices(conn, new_rows)
+
+            db.apply_symbol_rename(
+                conn,
+                "OLDSYM",
+                "NEWSYM",
+                effective_date="2025-01-02",
+                source="test",
+            )
+
+            before_cutoff = conn.execute(
+                "SELECT close FROM adjusted_eod_prices WHERE symbol = ? AND date = ?",
+                ("NEWSYM", "2025-01-01"),
+            ).fetchone()[0]
+            after_cutoff = conn.execute(
+                "SELECT close FROM adjusted_eod_prices WHERE symbol = ? AND date = ?",
+                ("NEWSYM", "2025-01-03"),
+            ).fetchone()[0]
+            old_remaining = conn.execute(
+                "SELECT COUNT(*) FROM adjusted_eod_prices WHERE symbol = ?",
+                ("OLDSYM",),
+            ).fetchone()[0]
+
+            self.assertEqual(before_cutoff, 100.5)
+            self.assertEqual(after_cutoff, 300.5)
+            self.assertEqual(old_remaining, 0)
         finally:
             conn.close()
 

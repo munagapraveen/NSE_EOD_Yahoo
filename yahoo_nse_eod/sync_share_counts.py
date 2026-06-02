@@ -5,6 +5,7 @@ import csv
 import sys
 import threading
 import time
+from datetime import datetime, timedelta
 
 import pandas as pd
 import yfinance as yf
@@ -39,6 +40,7 @@ def parse_args(args):
     options = {
         "limit": None,
         "only_missing": "--only-missing" in args,
+        "start": DEFAULT_HISTORY_START,
         "sleep_secs": 0.25,
         "retry_sleep_secs": 0.5,
         "workers": 4,
@@ -46,6 +48,13 @@ def parse_args(args):
     for i, arg in enumerate(args):
         if arg == "--limit" and i + 1 < len(args):
             options["limit"] = int(args[i + 1])
+        if arg == "--start" and i + 1 < len(args):
+            options["start"] = args[i + 1].strip()
+        if arg == "--recent-days" and i + 1 < len(args):
+            recent_days = max(1, int(args[i + 1]))
+            options["start"] = (
+                datetime.today() - timedelta(days=recent_days)
+            ).strftime("%Y-%m-%d")
         if arg == "--sleep" and i + 1 < len(args):
             options["sleep_secs"] = max(0.0, float(args[i + 1]))
         if arg == "--retry-sleep" and i + 1 < len(args):
@@ -59,6 +68,10 @@ def load_target_symbols(limit=None, only_missing=False):
     with get_connection() as conn:
         setup_schema(conn)
         symbols = get_active_symbols(conn)
+        
+        # Only fetch shares for mainboard stocks, not ETFs or Indices
+        symbols = symbols[symbols["instrument_type"] == "STOCK"].copy()
+        
         if limit:
             symbols = symbols.head(limit).copy()
         if only_missing:
@@ -276,7 +289,7 @@ def main():
     )
     run_share_download(
         symbols,
-        start=DEFAULT_HISTORY_START,
+        start=options["start"],
         workers=options["workers"],
         sleep_secs=options["sleep_secs"],
         retry_sleep_secs=options["retry_sleep_secs"],

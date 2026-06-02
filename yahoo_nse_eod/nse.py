@@ -105,20 +105,34 @@ def _resolve_csv_link(html, label_pattern):
     matches = re.findall(r'href="([^"]+)"[^>]*>(.*?)</a>', html, flags=re.I | re.S)
     for href, text in matches:
         cleaned = re.sub(r"\s+", " ", text).strip().lower()
-        if re.search(label_pattern, cleaned, flags=re.I):
+        # Use more flexible matching: allow for extra spaces or minor variations
+        pattern = label_pattern.replace(" ", r"\s*")
+        if re.search(pattern, cleaned, flags=re.I):
             return urljoin(NSE_SYMBOL_PAGE_URL, href)
     raise ValueError(f"Could not find NSE CSV link for pattern: {label_pattern}")
 
 
-def _fetch_csv_from_page(page_url, label_pattern):
+def _fetch_csv_from_page(page_url, label_pattern, max_retries=3):
     session = create_session()
-    page = session.get(page_url, timeout=30)
-    page.raise_for_status()
-    csv_url = _resolve_csv_link(page.text, label_pattern)
-    log.info(f"Resolved NSE CSV: {csv_url}")
-    data = session.get(csv_url, timeout=30)
-    data.raise_for_status()
-    return pd.read_csv(StringIO(data.text))
+    last_err = None
+    
+    for attempt in range(max_retries):
+        try:
+            page = session.get(page_url, timeout=30)
+            page.raise_for_status()
+            csv_url = _resolve_csv_link(page.text, label_pattern)
+            log.info(f"Resolved NSE CSV: {csv_url}")
+            data = session.get(csv_url, timeout=30)
+            data.raise_for_status()
+            return pd.read_csv(StringIO(data.text))
+        except Exception as e:
+            last_err = e
+            log.warning(f"Attempt {attempt+1}/{max_retries} failed for {label_pattern}: {e}")
+            if attempt < max_retries - 1:
+                import time
+                time.sleep(2)
+    
+    raise last_err
 
 
 def fetch_securities_master():
@@ -153,20 +167,107 @@ def fetch_securities_master():
 def fetch_etf_master():
     df = _fetch_csv_from_page(
         NSE_SYMBOL_PAGE_URL,
-        r"list of etfs",
+        r"securities available for trading in etf",
     )
     cols = {str(c).strip().upper(): c for c in df.columns}
     rename = {}
     for src, target in [
         ("SYMBOL", "symbol"),
+        ("SYMBOL ", "symbol"),  # Handle trailing space if any
         ("COMPANY NAME", "company_name"),
+        ("NAME OF COMPANY", "company_name"),
         ("ISIN", "isin"),
+        ("ISIN NUMBER", "isin"),
     ]:
         if src in cols:
             rename[cols[src]] = target
     df = df.rename(columns=rename)
     df["series"] = "EQ"  # ETFs are traded like EQ
     required = ["symbol", "company_name", "isin", "series"]
-    df = df[[c for c in required if c in df.columns]].copy()
+    
+    # Fill missing with empty string instead of dropping
+    for col in required:
+        if col not in df.columns:
+            df[col] = ""
+            
+    df = df[required].copy()
     df["symbol"] = df["symbol"].astype(str).str.strip().str.upper()
+    df["company_name"] = df["company_name"].astype(str).str.strip()
+    df["isin"] = df["isin"].fillna("").astype(str).str.strip().str.upper()
+    return df
+
+
+def fetch_indices_master():
+    """Fetch all indices from the NSE API."""
+    log.info("Fetching indices list from NSE API...")
+    session = create_session()
+    # Visit home page first to get cookies
+    session.get("https://www.nseindia.com/", timeout=15)
+    res = session.get("https://www.nseindia.com/api/allIndices", timeout=15)
+    res.raise_for_status()
+    data = res.json().get("data", [])
+    
+    # Extract 'indexSymbol' as the primary identifier
+    records = []
+    for item in data:
+        symbol = item.get("indexSymbol")
+        if symbol:
+            records.append({"symbol": symbol})
+            
+    return pd.DataFrame(records)
+
+
+def fetch_symbol_changes():
+    """Fetch CSV of symbol changes (renames) from NSE."""
+    df = _fetch_csv_from_page(
+        NSE_SYMBOL_PAGE_URL,
+        r"changes in symbols",
+    )
+    
+    # NSE symbolchange.csv sometimes has no header row.
+    # Check if 'OLD SYMBOL' (or similar) is in current columns.
+    has_header = any(
+        re.search(r"OLD.SYMBOL", str(c), re.I) 
+        for c in df.columns
+    )
+    
+    if not has_header:
+        # If no header, the first row was likely consumed as header.
+        # Re-read without header and assign standard names.
+        session = create_session()
+        page = session.get(NSE_SYMBOL_PAGE_URL, timeout=30)
+        page.raise_for_status()
+        csv_url = _resolve_csv_link(page.text, r"changes in symbols")
+        data = session.get(csv_url, timeout=30)
+        data.raise_for_status()
+        df = pd.read_csv(StringIO(data.text), header=None)
+        # Standard NSE order: Company Name, Old, New, Date
+        if len(df.columns) >= 4:
+            df.columns = ["company_name", "old_symbol", "new_symbol", "effective_date"] + list(df.columns[4:])
+    else:
+        # Map NSE columns to internal names
+        rename_map = {
+            "OLD SYMBOL": "old_symbol",
+            "NEW SYMBOL": "new_symbol",
+            "APPLICABLE FROM": "effective_date"
+        }
+        cols = {str(c).strip().upper(): c for c in df.columns}
+        final_rename = {cols[src]: target for src, target in rename_map.items() if src in cols}
+        df = df.rename(columns=final_rename)
+    
+    # Keep only necessary columns
+    required = ["old_symbol", "new_symbol", "effective_date"]
+    df = df[[c for c in required if c in df.columns]].copy()
+    
+    # Parse dates: 28-NOV-2016 -> 2016-11-28
+    def parse_dt(val):
+        try:
+            return datetime.strptime(str(val).strip(), "%d-%b-%Y").strftime("%Y-%m-%d")
+        except:
+            return None
+
+    df["effective_date"] = df["effective_date"].apply(parse_dt)
+    df["old_symbol"] = df["old_symbol"].astype(str).str.strip().str.upper()
+    df["new_symbol"] = df["new_symbol"].astype(str).str.strip().str.upper()
+    
     return df

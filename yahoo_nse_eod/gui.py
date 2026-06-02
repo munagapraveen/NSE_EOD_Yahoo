@@ -432,7 +432,7 @@ class YahooNSEGUI(QMainWindow):
         self.sidebar_layout.addWidget(card)
 
     def _update_clock(self):
-        self.clock_label.setText(datetime.now().strftime("%H:%M:%S  |  %d %b %Y"))
+        self.clock_label.setText(datetime.now().strftime("%H:%M:%S  |  %d-%m-%Y"))
 
     def _refresh_stats(self):
         if not DB_FILE.exists():
@@ -442,10 +442,18 @@ class YahooNSEGUI(QMainWindow):
             try:
                 conn = sqlite3.connect(DB_FILE)
                 active_count = conn.execute("SELECT COUNT(*) FROM symbols WHERE active = 1").fetchone()[0]
-                latest_date = conn.execute("SELECT MAX(date) FROM adjusted_eod_prices").fetchone()[0]
+                latest_date_str = conn.execute("SELECT MAX(date) FROM adjusted_eod_prices").fetchone()[0]
                 conn.close()
+                
+                display_date = "-"
+                if latest_date_str:
+                    try:
+                        display_date = datetime.strptime(latest_date_str, "%Y-%m-%d").strftime("%d-%m-%Y")
+                    except Exception:
+                        display_date = latest_date_str
+
                 self.active_sym_label.setText(f"Active Symbols: {active_count:,}")
-                self.updated_upto_label.setText(f"Updated upto: {latest_date or '-'}")
+                self.updated_upto_label.setText(f"Updated upto: {display_date}")
             except Exception as e:
                 log.error(f"Failed to refresh stats: {e}")
 
@@ -525,22 +533,24 @@ class YahooNSEGUI(QMainWindow):
                 pass
 
         if is_fresh:
-            self._log("\n[System] Fresh database detected. Starting Bootstrap (from 2020)...\n")
+            self._log("\n[System] Fresh database detected. Starting Bootstrap from configured history start...\n")
             self.task_queue = [
                 ("download_eod.py", ["--bootstrap"], "Bootstrap Yahoo EOD")
             ]
         else:
             self._log("\n[System] Existing data detected. Starting Incremental Update...\n")
             eod_args = []
+            share_args = ["--recent-days", "120"]
             if self.refetch_last_cb.isChecked():
                 eod_args.append("--refetch-last")
                 self._log("[System] Option enabled: Refetching last available date.\n")
             
             self.task_queue = [
                 ("sync_symbols.py", [], "Sync Symbols"),
+                ("sync_corporate_actions.py", ["--rebuild"], "Sync Corporate Actions"),
                 ("symbol_change_handler.py", ["--apply"], "Apply Symbol Changes"),
                 ("download_eod.py", eod_args, "Download EOD Updates"),
-                ("sync_share_counts.py", ["--only-missing"], "Download Missing Shares")
+                ("sync_share_counts.py", share_args, "Refresh Recent Shares")
             ]
         
         self._process_next_task()

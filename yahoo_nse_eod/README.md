@@ -50,10 +50,9 @@ The project stores:
   This is a source/staging table used to calculate market cap for new dates.
 - `raw_eod_prices`: raw Yahoo OHLCV, `Adj Close`, dividends, and splits
 - `adjusted_eod_prices`: split-adjusted OHLCV generated from raw history
-  plus split-adjusted `shares_outstanding`, `market_cap_cr`,
-  `ma_5`, `ma_10`, `ma_20`, `ma_50`, `ma_100`, `ma_200`
-  This is the authoritative historical analytics table once a date is inserted.
-- `corporate_actions`: dividend and split events derived from Yahoo history
+- `marketcap`: split-adjusted `shares_outstanding` and `market_cap_cr`
+- `indicators`: `ma_5`, `ma_10`, `ma_20`, `ma_50`, `ma_100`, `ma_200`
+- `corporate_actions`: verified split and bonus events synced from NSE
 
 ## Suggested flow
 
@@ -76,6 +75,7 @@ python download_eod.py --bootstrap --batch-size 50 --retry-sleep 2
 ```powershell
 python sync_share_counts.py
 python sync_share_counts.py --only-missing --workers 4
+python sync_share_counts.py --recent-days 120
 ```
 
 4. Build split-adjusted prices, market cap, and moving averages
@@ -132,7 +132,7 @@ python sharpe_screener.py --mcap 500 --rf 8 --turnover 2
 python sharpe_screener.py --date 2025-12-31 --long-months 6 --short-months 3
 ```
 
-11. Launch the new CustomTkinter GUI
+11. Launch the PySide6 GUI
 
 ```powershell
 python gui.py
@@ -144,7 +144,7 @@ python gui.py
 - NSE is used here for symbol maintenance, not price history.
 - Market cap is calculated on the split-adjusted basis so historical market caps stay stable when old prices are back-adjusted after a split refresh.
 - Corporate-action rebuilds preserve previously stored historical market-cap values by date, and adjust stored shares outstanding to match the refreshed adjusted close.
-- In other words: `share_history` helps create market cap for new dates, but `adjusted_eod_prices.market_cap_cr` is the authoritative historical market-cap series after insertion.
+- In other words: `share_history` helps create market cap for new dates, but `marketcap.market_cap_cr` is the authoritative historical market-cap series after insertion.
 - `sync_share_counts.py` now uses controlled parallelism, retries failed symbols sequentially at the end, and writes unresolved failures to `data/share_download_failures_latest.csv`.
 - `download_eod.py` retries failed Yahoo batches with backoff, then falls back to one-symbol-at-a-time recovery for stubborn/rate-limited batches, and writes unresolved failures to `data/eod_download_failures_latest.csv`.
 - Dividend-adjusted total-return series can be added later if needed.

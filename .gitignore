@@ -5,3 +5,4 @@
 *.db-wal
 *.csv
 *.log
+/nse_eod_codex
