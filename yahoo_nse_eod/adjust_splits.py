@@ -134,11 +134,36 @@ def build_split_adjusted(df, actions=None):
 
 def attach_market_cap(adjusted_df, share_df):
     """
-    Align historical shares to price dates, then convert them onto the same
-    split-adjusted basis as the adjusted close series.
+    Compute true historical market cap: actual_price × actual_shares_outstanding.
 
-    This is used for first-time insertion and for newly appended dates that do
-    not yet have an authoritative stored historical market cap.
+    Yahoo's 'Close' is retroactively split-adjusted (÷ split_factor). To recover
+    the actual traded price we multiply back by split_factor:
+
+        actual_price = raw_close × split_factor
+                     = adj_close × split_factor²
+
+    Yahoo's shares_outstanding (from get_shares_full) is point-in-time from
+    quarterly filings, so it is NOT retroactively adjusted for splits.
+
+    However, depending on when share data was downloaded, two situations arise:
+
+      JUMP  (~80%): shares jumped by ~split_factor on/near ex-date.
+                    Shares are actual pre-split counts before the event.
+                    → price_scale = split_factor for pre-event dates.
+                    → market_cap = adj_close × split_factor × price_scale × shares
+                                 = adj_close × split_factor² × shares
+                                 = actual_price × actual_shares  ✓
+
+      NO JUMP (~20%): shares already at post-split level for all dates
+                      (Yahoo retroactively updated them via later filings).
+                    → price_scale = 1.0 for all dates.
+                    → market_cap = adj_close × split_factor × 1.0 × shares
+                                 = raw_close × shares
+                                 = actual_price × actual_shares  ✓
+                      (post-split shares cancel the ÷split_factor in raw_close)
+
+    Detection: for each corporate action, inspect share_history in a ±5-day
+    window around the ex-date. If shares jumped by ≈split_factor → JUMP.
     """
     if adjusted_df.empty:
         return adjusted_df
@@ -147,7 +172,6 @@ def attach_market_cap(adjusted_df, share_df):
     work["date"] = pd.to_datetime(work["date"])
 
     if share_df.empty:
-        # Convert to string for SQLite safety even in early return
         work["date"] = work["date"].dt.strftime("%Y-%m-%d")
         return work.where(pd.notnull(work), None)
 
@@ -163,85 +187,228 @@ def attach_market_cap(adjusted_df, share_df):
     work["date"] = pd.to_datetime(work["date"])
     work = work.sort_values("date")
 
-    # Drop the placeholder columns before merging to avoid suffix collisions (_x, _y)
+    # Drop placeholder columns before merging to avoid suffix collisions
     cols_to_drop = [c for c in ["shares_outstanding", "market_cap_cr"] if c in work.columns]
     work = work.drop(columns=cols_to_drop)
 
+    # Align point-in-time shares to each price date (last-known-forward-fill)
     merged = pd.merge_asof(
         work,
         shares[["date", "shares_outstanding"]],
         on="date",
         direction="backward",
     )
-    merged["shares_outstanding"] = merged["shares_outstanding"].fillna(
-        shares["shares_outstanding"].iloc[0]
+    # H-1 fix: for dates before the first share history entry, fill forward
+    # using the earliest known share value SCALED BACK by split_factor.
+    # (earliest share count is typically post-split; dividing by split_factor
+    #  recovers the pre-split share count for those earlier dates.)
+    first_share_val = float(shares["shares_outstanding"].iloc[0])
+    missing_mask = merged["shares_outstanding"].isna()
+    if missing_mask.any():
+        sf_at_missing = pd.to_numeric(
+            merged.loc[missing_mask, "split_factor"], errors="coerce"
+        ).fillna(1.0)
+        # split_factor for earliest dates = cumulative factor STILL TO BE applied
+        # If shares.iloc[0] is post-split, dividing by (sf_at_date / sf_at_first_share_date)
+        # gives the actual share count at that early date.
+        sf_at_first_share = pd.to_numeric(
+            merged.loc[merged["date"] >= shares["date"].iloc[0], "split_factor"],
+            errors="coerce"
+        ).iloc[0] if (merged["date"] >= shares["date"].iloc[0]).any() else 1.0
+        scale = (sf_at_missing / sf_at_first_share).clip(lower=1.0)
+        merged.loc[missing_mask, "shares_outstanding"] = (first_share_val / scale).round(0)
+    # Any remaining NaN (no share data at all) fall back to first known value
+    merged["shares_outstanding"] = merged["shares_outstanding"].fillna(first_share_val)
+
+    # ------------------------------------------------------------------ #
+    # Step 1: Identify all corporate action ex-dates from the price data  #
+    # stock_splits is not carried into adjusted_df; instead we derive it  #
+    # as share_factor / split_factor (= split multiplier on that date).  #
+    # ------------------------------------------------------------------ #
+    symbol = merged["symbol"].iloc[0] if "symbol" in merged.columns else "?"
+    sf_col   = pd.to_numeric(merged["split_factor"], errors="coerce").replace(0, 1.0)
+    shf_col  = pd.to_numeric(merged["share_factor"], errors="coerce").replace(0, 1.0)
+    merged["_split_on_date"] = (shf_col / sf_col).round(6)
+    raw_action_rows = merged[merged["_split_on_date"] > 1.01][["date", "_split_on_date"]].rename(
+        columns={"_split_on_date": "stock_splits"}
     )
-    
-    # Smart Share Adjustment: Detect if raw shares are already post-split on the split day
-    # OR if the adjustment is delayed by a few days (common on Yahoo Finance)
-    raw_shares_series = pd.to_numeric(merged["shares_outstanding"], errors="coerce")
-    final_shares = []
-    
-    # Pre-calculate known delayed jumps
-    delayed_jumps = {} # {split_date_obj: jump_detected_idx}
-    for row in merged.itertuples():
-        s_factor = float(row.share_factor)
-        p_factor = float(row.split_factor)
-        split_today = s_factor / p_factor if p_factor > 0 else 1.0
-        if split_today > 1.1:
-            lookahead = merged.loc[row.Index : row.Index + 7]
-            for next_row in lookahead.itertuples():
-                if next_row.Index == 0: continue
-                prev_val = float(merged.loc[next_row.Index - 1, "shares_outstanding"])
-                if prev_val > 0 and abs(float(next_row.shares_outstanding) / prev_val - split_today) < abs(float(next_row.shares_outstanding) / prev_val - 1.0):
-                    delayed_jumps[row.date] = next_row.Index
-                    log.info(f"SMART SHARE: Delayed split jump for {row.symbol} on {next_row.date} (Split Date: {row.date})")
-                    break
+    # C-5 fix: aggregate same-date actions by multiplying their split factors.
+    # Without this, two actions on the same date produce two entries in action_rows;
+    # the JUMP detection loop writes price_scale_map twice with the same key,
+    # silently discarding the first detection result (last-write-wins bug).
+    action_rows = (
+        raw_action_rows.groupby("date", as_index=False)["stock_splits"]
+        .prod()  # combined split factor for same-date actions
+    )
 
-    for row in merged.itertuples():
-        current_raw_shares = float(row.shares_outstanding)
-        
-        # Logic: 
-        # 1. Start with split_factor (adjusts all historical splits AFTER today to current basis)
-        effective_factor = float(row.split_factor)
-        
-        # 2. For every split that has happened ON or BEFORE today:
-        # We need to decide if we also need to adjust TODAY'S raw shares for that specific split.
-        for split_date, jump_idx in delayed_jumps.items():
-            if row.date >= split_date:
-                if row.Index < jump_idx:
-                    # This split has 'happened' but isn't in raw shares yet.
-                    # SCALE UP.
-                    match_row = merged[merged["date"] == split_date].iloc[0]
-                    ratio = match_row.share_factor / match_row.split_factor
-                    effective_factor *= ratio
-                else:
-                    # This split IS in raw shares. No extra factor needed.
-                    pass
-            else:
-                # This split hasn't happened yet. Standard cumulative logic handles it.
-                pass
-        
-        final_shares.append(current_raw_shares * effective_factor)
+    # ------------------------------------------------------------------ #
+    # Step 2: Detect JUMP vs NO-JUMP for each corporate action            #
+    # ------------------------------------------------------------------ #
+    # price_scale[action_date] = split_factor if JUMP, else 1.0
+    price_scale_map = {}  # {action_date (Timestamp): price_scale_factor}
 
-    merged["shares_outstanding"] = final_shares
+    for _, arow in action_rows.iterrows():
+        action_date = arow["date"]
+        sf = float(arow["stock_splits"])
+
+        # Find most recent share entry strictly BEFORE the window (-5 days)
+        window_start = action_date - pd.Timedelta(days=5)
+        window_end   = action_date + pd.Timedelta(days=5)
+
+        pre_shares_df = shares[shares["date"] < window_start]
+        post_shares_df = shares[shares["date"] <= window_end]
+
+        if pre_shares_df.empty or post_shares_df.empty:
+            # Not enough data to detect — default to NO JUMP (safer)
+            price_scale_map[action_date] = 1.0
+            log.info(
+                f"MCap [{symbol}] {action_date.date()}: insufficient share data for jump "
+                f"detection, defaulting to NO-JUMP (price_scale=1.0)"
+            )
+            continue
+
+        shares_before = float(pre_shares_df["shares_outstanding"].iloc[-1])
+        shares_after  = float(post_shares_df["shares_outstanding"].iloc[-1])
+
+        if shares_before <= 0:
+            price_scale_map[action_date] = 1.0
+            continue
+
+        ratio = shares_after / shares_before
+        tolerance = sf * 0.15  # 15% tolerance around expected jump
+
+        if abs(ratio - sf) <= tolerance:
+            # Shares jumped by ~split_factor → point-in-time actual shares
+            price_scale_map[action_date] = sf
+            log.info(
+                f"MCap [{symbol}] {action_date.date()}: JUMP detected "
+                f"(shares {shares_before:,.0f} → {shares_after:,.0f}, ratio={ratio:.3f}, sf={sf}). "
+                f"price_scale={sf} (adj×sf²×shares = true historical mcap)"
+            )
+        else:
+            # No meaningful jump → shares already retroactively at post-split level
+            price_scale_map[action_date] = 1.0
+            log.info(
+                f"MCap [{symbol}] {action_date.date()}: NO JUMP detected "
+                f"(shares {shares_before:,.0f} → {shares_after:,.0f}, ratio={ratio:.3f}, sf={sf}). "
+                f"price_scale=1.0 (raw_close×shares = true historical mcap)"
+            )
+
+    # ------------------------------------------------------------------ #
+    # Step 3: Build per-row price_scale column                            #
+    #                                                                     #
+    # After build_split_adjusted(), adj_close x split_factor already     #
+    # equals the actual traded price in ALL cases.                        #
+    #                                                                     #
+    # market_cap = actual_price x price_scale x hist_shares / 1e7        #
+    #                                                                     #
+    # JUMP (pre-split actual shares in share_history):                    #
+    #   price_scale = 1.0 (default)                                       #
+    #   = actual_price x pre_split_shares = true mcap  OK                #
+    #                                                                     #
+    # NO JUMP (shares already post-split = S x sf throughout):           #
+    #   naive = actual_price x S x sf = true_mcap x sf  (sf x too high) #
+    #   fix:  price_scale = 1 / sf  =>  actual_price / sf x S x sf = true mcap OK
+    # ------------------------------------------------------------------ #
+    merged["price_scale"] = 1.0
+
+    for action_date, ps in price_scale_map.items():
+        sf_series = action_rows[action_rows["date"] == action_date]["stock_splits"]
+        if sf_series.empty:
+            continue
+        sf_val = float(sf_series.iloc[0])
+
+        if ps == 1.0:
+            # NO-JUMP: shares are already post-split for all dates.
+            # actual_price x post_split_shares / 1e7 = true_mcap x sf (too high)
+            # Fix: divide by sf for pre-event dates.
+            if sf_val > 1.0:
+                pre_mask = merged["date"] < action_date
+                merged.loc[pre_mask, "price_scale"] = (
+                    merged.loc[pre_mask, "price_scale"] / sf_val
+                )
+        else:
+            # JUMP: shares are actual pre-split counts UNTIL the share jump.
+            # Determine the pre-split share level (last entry before the action window).
+            pre_window = action_date - pd.Timedelta(days=5)
+            pre_shares_series = shares[shares["date"] < pre_window]["shares_outstanding"]
+            if pre_shares_series.empty:
+                continue
+            pre_split_level = float(pre_shares_series.iloc[-1])
+            pre_split_threshold = pre_split_level * 1.3
+
+            on_or_after_mask = merged["date"] >= action_date
+            pre_split_shares_mask = (
+                pd.to_numeric(merged["shares_outstanding"], errors="coerce") < pre_split_threshold
+            )
+            fix_mask = on_or_after_mask & pre_split_shares_mask
+            if fix_mask.any():
+                merged.loc[fix_mask, "price_scale"] = (
+                    merged.loc[fix_mask, "price_scale"] * sf_val
+                )
+            
+            # D0 override: on the exact ex-date, Yahoo share counts may be mid-transition.
+            # Always pin D0 shares to the confirmed pre-split level for JUMP stocks.
+            d0_mask = merged["date"] == action_date
+            if d0_mask.any():
+                merged.loc[d0_mask, "shares_outstanding"] = pre_split_level
+
+    # ------------------------------------------------------------------ #
+    # Step 3b: D0 shares override for NO-JUMP stocks                     #
+    # On the ex-date, Yahoo shares are already at post-split level.      #
+    # Pin D0 to pre-split count (= post-split / sf) so mcap is correct. #
+    # ------------------------------------------------------------------ #
+    for action_date, ps in price_scale_map.items():
+        if ps != 1.0:
+            continue  # JUMP handled in Step 3 above
+        sf_series = action_rows[action_rows["date"] == action_date]["stock_splits"]
+        if sf_series.empty:
+            continue
+        sf_val = float(sf_series.iloc[0])
+        if sf_val <= 1.0:
+            continue
+        # For NO-JUMP: D0 shares are at post-split level. Divide by sf to get pre-split.
+        d0_mask = merged["date"] == action_date
+        if d0_mask.any():
+            d0_shares = pd.to_numeric(
+                merged.loc[d0_mask, "shares_outstanding"], errors="coerce"
+            ).iloc[0]
+            if pd.notna(d0_shares) and d0_shares > 0:
+                merged.loc[d0_mask, "shares_outstanding"] = round(d0_shares / sf_val, 0)
+
+    # ------------------------------------------------------------------ #
+    # Step 4: Compute market cap                                          #
+    # actual_price  = adj_close x split_factor                           #
+    # market_cap_cr = actual_price x price_scale x hist_shares / 1e7    #
+    # ------------------------------------------------------------------ #
     merged["market_cap_cr"] = (
         pd.to_numeric(merged["close"], errors="coerce") *
-        pd.to_numeric(merged["shares_outstanding"], errors="coerce") / 1e7
+        pd.to_numeric(merged["split_factor"], errors="coerce") *
+        merged["price_scale"] *
+        pd.to_numeric(merged["shares_outstanding"], errors="coerce") /
+        1e7
     ).round(4)
+
+    cols_to_drop_tmp = [c for c in ["price_scale", "_split_on_date"] if c in merged.columns]
+    merged = merged.drop(columns=cols_to_drop_tmp)
     merged["date"] = merged["date"].dt.strftime("%Y-%m-%d")
-    
-    # Convert NAType/NaN to None for SQLite safety
+
     return merged.where(pd.notnull(merged), None)
 
 
 def preserve_existing_market_cap(adjusted_df, existing_df):
     """
     Keep previously stored historical market cap values by date, and derive the
-    corresponding adjusted shares outstanding from refreshed adjusted close.
+    corresponding shares_outstanding from the stored market_cap_cr and raw_close.
 
     This is used during corporate-action rebuilds so historical market cap
     remains stable even when adjusted close is rewritten for old dates.
+
+    Back-derivation:
+        true_mcap = actual_price × actual_shares
+        actual_price = raw_close = adj_close × split_factor
+        → actual_shares = true_mcap × 1e7 / raw_close
+                        = market_cap_cr × 1e7 / (adj_close × split_factor)
     """
     if adjusted_df.empty or existing_df.empty:
         return adjusted_df
@@ -263,11 +430,16 @@ def preserve_existing_market_cap(adjusted_df, existing_df):
     has_existing = work["market_cap_cr_existing"].notna()
     work.loc[has_existing, "market_cap_cr"] = work.loc[has_existing, "market_cap_cr_existing"]
 
-    close_series = pd.to_numeric(work["close"], errors="coerce")
+    # Back-derive actual shares from stored market cap using raw_close
+    # raw_close = adj_close × split_factor (undoes Yahoo's retroactive price adjustment)
+    adj_close_series  = pd.to_numeric(work["close"], errors="coerce")
+    split_factor_series = pd.to_numeric(work["split_factor"], errors="coerce")
+    raw_close_series  = adj_close_series * split_factor_series
     market_cap_series = pd.to_numeric(work["market_cap_cr"], errors="coerce")
-    valid = has_existing & close_series.notna() & (close_series != 0)
+
+    valid = has_existing & raw_close_series.notna() & (raw_close_series != 0)
     work.loc[valid, "shares_outstanding"] = (
-        market_cap_series[valid] * 1e7 / close_series[valid]
+        market_cap_series[valid] * 1e7 / raw_close_series[valid]
     ).round(4)
 
     work.drop(columns=["market_cap_cr_existing"], inplace=True)
@@ -319,6 +491,15 @@ def refresh_latest_rows(symbol_date_map):
             shares = load_share_history(conn, symbol)
             adjusted = attach_market_cap(adjusted, shares)
             
+            # H-2 fix: preserve previously stored historical market caps.
+            # attach_market_cap() freshly recomputes from share_history, which is
+            # correct for new dates but would overwrite stored historical values
+            # (which may reflect a different share count at the time of original
+            # computation). Only new dates (not already in marketcap table) should
+            # use the freshly computed value.
+            existing_market_caps = load_adjusted_market_caps(conn, symbol)
+            adjusted = preserve_existing_market_cap(adjusted, existing_market_caps)
+
             # Ensure adjusted['date'] is string and target_dates format matches
             adjusted["date"] = adjusted["date"].astype(str)
             target_dates = {

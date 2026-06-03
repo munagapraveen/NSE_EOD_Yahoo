@@ -236,9 +236,11 @@ def mark_missing_symbols_inactive(conn, active_symbols):
     Marks symbols not in the active_symbols list as inactive.
     Uses a temporary table to avoid SQLite's max variable limit for IN clauses.
     """
-    if not active_symbols:
-        conn.execute("UPDATE symbols SET active = 0, status = 'inactive'")
-        conn.commit()
+    if active_symbols is None:
+        log.warning("mark_missing_symbols_inactive called with None — skipping to avoid mass deactivation.")
+        return
+    if len(active_symbols) == 0:
+        log.warning("mark_missing_symbols_inactive called with empty list — skipping to avoid mass deactivation.")
         return
 
     # Create temporary table for comparison
@@ -403,6 +405,8 @@ def save_market_caps(conn, df):
     
     cols = ["symbol", "date", "market_cap_cr", "shares_outstanding"]
     if not all(c in df.columns for c in cols):
+        missing = [c for c in cols if c not in df.columns]
+        log.warning(f"save_market_caps: skipping — missing columns: {missing}")
         return
 
     data = [

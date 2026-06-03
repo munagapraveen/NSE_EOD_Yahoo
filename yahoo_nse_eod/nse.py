@@ -54,29 +54,43 @@ def fetch_nse_corporate_actions(start_date="01-01-2024", end_date=None):
             continue
             
         # 1. Parse Splits
-        if "split" in subject or "sub-division" in subject:
-            # Handle "From Rs 10/- To Re 1/-" or similar
-            match = re.search(r"from r[es]\s*(\d+).*?to r[es]\s*(\d+)", subject)
+        if "split" in subject or "sub-division" in subject or "subdivision" in subject:
+            # Try multiple patterns in order of specificity:
+            # Pattern A: "from Rs 10/- to Re 1/-"  or  "from Rs.10 to Re.1"
+            match = re.search(r"from\s+r[se]\.?\s*([\d.]+).*?to\s+r[se]\.?\s*([\d.]+)", subject)
             if not match:
-                # Fallback to simple digit-to-digit
-                match = re.search(r"(\d+)\s*to\s*(\d+)", subject)
-            
+                # Pattern B: "from fv 10 to fv 1"  or  "fv rs 10 to fv re 1"
+                match = re.search(r"fv\s+(?:r[se]\.?\s*)?([\d.]+).*?to\s+(?:fv\s+)?(?:r[se]\.?\s*)?([\d.]+)", subject)
+            if not match:
+                # Pattern C: generic "10 to 1" — only if digits are clearly face values (integer-like)
+                match = re.search(r"\b(\d+)\s*(?:/-\s*)?to\s+(\d+)\s*(?:/-)?", subject)
+
             if match:
                 old_fv = float(match.group(1))
                 new_fv = float(match.group(2))
-                if new_fv > 0:
+                if new_fv > 0 and old_fv != new_fv:
+                    split_value = round(old_fv / new_fv, 4)
+                    if split_value < 1.0:
+                        # Reverse split (consolidation) — old_fv < new_fv
+                        log.warning(
+                            f"Reverse split detected for {symbol} on {ex_date}: "
+                            f"FV {old_fv} to {new_fv} (factor={split_value:.4f}). "
+                            f"Subject: {orig_subject}"
+                        )
                     try:
                         dt = datetime.strptime(ex_date, "%d-%b-%Y").strftime("%Y-%m-%d")
                         rows.append({
                             "symbol": symbol,
                             "ex_date": dt,
                             "action_type": "split",
-                            "value": round(old_fv / new_fv, 4),
+                            "value": split_value,
                             "source": "nse",
                             "note": orig_subject
                         })
                     except Exception:
-                        pass
+                        log.warning(f"Could not parse ex_date '{ex_date}' for {symbol} split: {orig_subject}")
+            else:
+                log.warning(f"Split subject not parsed for {symbol} on {ex_date}: {orig_subject}")
 
         # 2. Parse Bonuses
         if "bonus" in subject:
