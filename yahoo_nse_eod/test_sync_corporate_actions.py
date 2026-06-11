@@ -58,8 +58,8 @@ class SyncCorporateActionsTests(unittest.TestCase):
                     )
 
             self.assertEqual(summary["synced"], 2)
-            self.assertEqual(summary["rebuilt_symbols"], ["AAA", "BBB"])
-            self.assertEqual(rebuilt, [(["AAA", "BBB"], True)])
+            self.assertEqual(summary["rebuilt_symbols"], ["BBB"])
+            self.assertEqual(rebuilt, [(["BBB"], True)])
         finally:
             conn.close()
 

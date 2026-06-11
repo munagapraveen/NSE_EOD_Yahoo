@@ -1,12 +1,1 @@
-Check 'Retry Failures'
-
- Just wanted to modify how roc is calculated. ROC had to get be the exact date(or next available date) of those those
-   months past. Ex: Suppose Today is 22/05/2026, then ROC 3 months had to be 22/02/2026 (or next available date). The
-   same logic applies to other ROC like ROC 6 months, ROC 12 months etc. Sharpe values also had to calculated using
-   same logic
-
-
-Comapre data fetched between
-D:\Praveen\gemini\yahoo_nse_eod (Zerdoha-Yahoo data project)
-&
-D:\Praveen\Codex\NSED\yahoo_nse_eod(Only yahoo data project)
+Is the download went fine? Check the Stock Symbols we checked previously for any discrepancies

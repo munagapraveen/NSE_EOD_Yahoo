@@ -247,6 +247,7 @@ class YahooNSEGUI(QMainWindow):
             btn.setFixedWidth(200) # Even smaller buttons
             btn.setToolTip(TOOLTIPS.get(label, ""))
             btn.setCursor(Qt.PointingHandCursor)
+            btn.setEnabled(False)  # Disabled - automated via Fetch Data
                 
             btn.clicked.connect(lambda checked=False, s=script, a=args, l=label: self._run_script(s, a, l))
             card.layout.addWidget(btn, 0, Qt.AlignCenter)
@@ -256,6 +257,7 @@ class YahooNSEGUI(QMainWindow):
         self.apply_changes_cb = QCheckBox("Auto-Apply Detected Changes")
         self.apply_changes_cb.setChecked(True)
         self.apply_changes_cb.setCursor(Qt.PointingHandCursor)
+        self.apply_changes_cb.setEnabled(False)  # Disabled - automated via Fetch Data
         self.apply_changes_cb.setStyleSheet("""
             QCheckBox {
                 color: #e2e8f0;
@@ -284,6 +286,7 @@ class YahooNSEGUI(QMainWindow):
         detect_btn.setFixedWidth(200)
         detect_btn.setToolTip(TOOLTIPS["Detect Symbol Changes"])
         detect_btn.setCursor(Qt.PointingHandCursor)
+        detect_btn.setEnabled(False)  # Disabled - automated via Fetch Data
         detect_btn.clicked.connect(self._run_symbol_detection)
         card.layout.addWidget(detect_btn, 0, Qt.AlignCenter)
 
@@ -292,6 +295,7 @@ class YahooNSEGUI(QMainWindow):
         retry_btn.setFixedWidth(200)
         retry_btn.setStyleSheet("background-color: #b45309;")
         retry_btn.setCursor(Qt.PointingHandCursor)
+        retry_btn.setEnabled(False)  # Disabled - automated via Fetch Data
 
         retry_btn.clicked.connect(self._retry_failed)
         card.layout.addWidget(retry_btn, 0, Qt.AlignCenter)
@@ -483,7 +487,15 @@ class YahooNSEGUI(QMainWindow):
         self._run_script("symbol_change_handler.py", args, label)
 
     def _handle_output(self):
-        data = self.process.readAllStandardOutput().data().decode()
+        raw_data = self.process.readAllStandardOutput().data()
+        try:
+            data = raw_data.decode('utf-8')
+        except UnicodeDecodeError:
+            try:
+                import locale
+                data = raw_data.decode(locale.getpreferredencoding(), errors='replace')
+            except Exception:
+                data = raw_data.decode('cp1252', errors='replace')
         self.log_viewer.insertPlainText(data)
         self.log_viewer.moveCursor(QTextCursor.End)
 
@@ -547,9 +559,9 @@ class YahooNSEGUI(QMainWindow):
             
             self.task_queue = [
                 ("sync_symbols.py", [], "Sync Symbols"),
-                ("sync_corporate_actions.py", ["--rebuild"], "Sync Corporate Actions"),
                 ("symbol_change_handler.py", ["--apply"], "Apply Symbol Changes"),
                 ("download_eod.py", eod_args, "Download EOD Updates"),
+                ("sync_corporate_actions.py", ["--rebuild"], "Sync Corporate Actions"),
                 ("sync_share_counts.py", share_args, "Refresh Recent Shares")
             ]
         

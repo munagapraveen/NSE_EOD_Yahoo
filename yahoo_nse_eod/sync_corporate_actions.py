@@ -49,12 +49,14 @@ def run_corporate_sync(start_date="01-01-2024", end_date=None, rebuild=False, re
                 record["action_type"],
                 record["source"],
             )
-            new_value = (
-                record["value"],
-                _normalize_note(record.get("note")),
-            )
-            if existing_map.get(key) != new_value:
+            # Rebuild only if action is new OR value has changed (ignore cosmetic note changes) (M-5)
+            existing_entry = existing_map.get(key)
+            if existing_entry is None:
                 changed_symbols.add(record["symbol"])
+            else:
+                existing_val, existing_note = existing_entry
+                if existing_val != record["value"]:
+                    changed_symbols.add(record["symbol"])
         upsert_corporate_actions(conn, records)
 
     log.info(f"Successfully synced {len(records)} corporate actions from NSE.")

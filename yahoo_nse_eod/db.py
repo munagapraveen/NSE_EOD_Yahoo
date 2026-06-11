@@ -201,7 +201,21 @@ def setup_schema(conn):
     if "indicator" in indicator_cols:
         log.info("Indicators table is in old format. Recreating...")
         conn.execute("DROP TABLE indicators")
-        setup_schema(conn)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS indicators (
+                symbol            TEXT NOT NULL,
+                date              TEXT NOT NULL,
+                ma_5              REAL,
+                ma_10             REAL,
+                ma_20             REAL,
+                ma_50             REAL,
+                ma_100            REAL,
+                ma_200            REAL,
+                PRIMARY KEY (symbol, date)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_indicators_symbol_date ON indicators(symbol, date)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_indicators_date ON indicators(date)")
         return
 
     conn.commit()

@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 import pandas as pd
 import yfinance as yf
@@ -177,10 +178,12 @@ def run_share_download(
     log.info("")
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {
-            executor.submit(_fetch_one, row, start, fetcher): row
-            for row in symbols.itertuples(index=False)
-        }
+        futures = {}
+        for row in symbols.itertuples(index=False):
+            future = executor.submit(_fetch_one, row, start, fetcher)
+            futures[future] = row
+            time.sleep(sleep_secs)
+
         for idx, future in enumerate(as_completed(futures), start=1):
             row = futures[future]
             try:
@@ -215,7 +218,6 @@ def run_share_download(
                     f"{'returned no data' if result['status'] == 'empty' else 'failed'} "
                     f"({result['error']})"
                 )
-            time.sleep(sleep_secs)
 
     retried = []
     if failed:
@@ -223,7 +225,7 @@ def run_share_download(
         log.info(f"Retrying {len(failed):,} failed/empty symbols sequentially ...")
         for idx, entry in enumerate(failed, start=1):
             try:
-                row = type("Row", (), entry)
+                row = SimpleNamespace(**entry)
                 result = _fetch_one(row, start, fetcher)
                 if result["status"] == "ok":
                     persist_func(result["records"])

@@ -64,7 +64,7 @@ def build_split_adjusted(df, actions=None):
     prev_close = work["close"].shift(1)
     raw_ratio = work["close"] / prev_close
     
-    split_indices = work[(work["stock_splits"] > 1.0)].index
+    split_indices = work[(work["stock_splits"] > 0.0) & (work["stock_splits"] != 1.0)].index
     
     for idx in split_indices:
         split = work.loc[idx, "stock_splits"]
@@ -327,6 +327,12 @@ def attach_market_cap(adjusted_df, share_df):
                 merged.loc[pre_mask, "price_scale"] = (
                     merged.loc[pre_mask, "price_scale"] / sf_val
                 )
+                # Scale up price on the exact ex-date to match pre-split shares override (Step 3b)
+                ex_mask = merged["date"] == action_date
+                if ex_mask.any():
+                    merged.loc[ex_mask, "price_scale"] = (
+                        merged.loc[ex_mask, "price_scale"] * sf_val
+                    )
         else:
             # JUMP: shares are actual pre-split counts UNTIL the share jump.
             # Determine the pre-split share level (last entry before the action window).
@@ -337,6 +343,11 @@ def attach_market_cap(adjusted_df, share_df):
             pre_split_level = float(pre_shares_series.iloc[-1])
             pre_split_threshold = pre_split_level * 1.3
 
+            # D0 override: Always pin D0 shares to confirmed pre-split level BEFORE evaluating masks.
+            d0_mask = merged["date"] == action_date
+            if d0_mask.any():
+                merged.loc[d0_mask, "shares_outstanding"] = pre_split_level
+
             on_or_after_mask = merged["date"] >= action_date
             pre_split_shares_mask = (
                 pd.to_numeric(merged["shares_outstanding"], errors="coerce") < pre_split_threshold
@@ -346,12 +357,6 @@ def attach_market_cap(adjusted_df, share_df):
                 merged.loc[fix_mask, "price_scale"] = (
                     merged.loc[fix_mask, "price_scale"] * sf_val
                 )
-            
-            # D0 override: on the exact ex-date, Yahoo share counts may be mid-transition.
-            # Always pin D0 shares to the confirmed pre-split level for JUMP stocks.
-            d0_mask = merged["date"] == action_date
-            if d0_mask.any():
-                merged.loc[d0_mask, "shares_outstanding"] = pre_split_level
 
     # ------------------------------------------------------------------ #
     # Step 3b: D0 shares override for NO-JUMP stocks                     #

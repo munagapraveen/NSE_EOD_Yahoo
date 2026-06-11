@@ -126,7 +126,7 @@ def _resolve_csv_link(html, label_pattern):
     raise ValueError(f"Could not find NSE CSV link for pattern: {label_pattern}")
 
 
-def _fetch_csv_from_page(page_url, label_pattern, max_retries=3):
+def _fetch_csv_from_page(page_url, label_pattern, max_retries=3, **kwargs):
     session = create_session()
     last_err = None
     
@@ -138,7 +138,7 @@ def _fetch_csv_from_page(page_url, label_pattern, max_retries=3):
             log.info(f"Resolved NSE CSV: {csv_url}")
             data = session.get(csv_url, timeout=30)
             data.raise_for_status()
-            return pd.read_csv(StringIO(data.text))
+            return pd.read_csv(StringIO(data.text), **kwargs)
         except Exception as e:
             last_err = e
             log.warning(f"Attempt {attempt+1}/{max_retries} failed for {label_pattern}: {e}")
@@ -236,29 +236,24 @@ def fetch_symbol_changes():
     df = _fetch_csv_from_page(
         NSE_SYMBOL_PAGE_URL,
         r"changes in symbols",
+        header=None,
     )
     
-    # NSE symbolchange.csv sometimes has no header row.
-    # Check if 'OLD SYMBOL' (or similar) is in current columns.
+    if df.empty:
+        return df
+        
+    # Check if the first row contains column headers
+    first_row = df.iloc[0].astype(str).str.upper().str.strip().tolist()
     has_header = any(
-        re.search(r"OLD.SYMBOL", str(c), re.I) 
-        for c in df.columns
+        re.search(r"OLD.SYMBOL", col, re.I) or "OLD SYMBOL" in col
+        for col in first_row
     )
     
-    if not has_header:
-        # If no header, the first row was likely consumed as header.
-        # Re-read without header and assign standard names.
-        session = create_session()
-        page = session.get(NSE_SYMBOL_PAGE_URL, timeout=30)
-        page.raise_for_status()
-        csv_url = _resolve_csv_link(page.text, r"changes in symbols")
-        data = session.get(csv_url, timeout=30)
-        data.raise_for_status()
-        df = pd.read_csv(StringIO(data.text), header=None)
-        # Standard NSE order: Company Name, Old, New, Date
-        if len(df.columns) >= 4:
-            df.columns = ["company_name", "old_symbol", "new_symbol", "effective_date"] + list(df.columns[4:])
-    else:
+    if has_header:
+        # Set first row as column header and drop it
+        df.columns = df.iloc[0]
+        df = df[1:].reset_index(drop=True)
+        
         # Map NSE columns to internal names
         rename_map = {
             "OLD SYMBOL": "old_symbol",
@@ -268,6 +263,10 @@ def fetch_symbol_changes():
         cols = {str(c).strip().upper(): c for c in df.columns}
         final_rename = {cols[src]: target for src, target in rename_map.items() if src in cols}
         df = df.rename(columns=final_rename)
+    else:
+        # Standard NSE order: Company Name, Old, New, Date
+        if len(df.columns) >= 4:
+            df.columns = ["company_name", "old_symbol", "new_symbol", "effective_date"] + list(df.columns[4:])
     
     # Keep only necessary columns
     required = ["old_symbol", "new_symbol", "effective_date"]

@@ -111,10 +111,10 @@ def persist_history(history, bootstrap):
         insert_raw_prices(conn, history)
         if action_records:
             upsert_corporate_actions(conn, action_records)
-    if bootstrap and touched_symbols:
-        rebuild_symbols(touched_symbols)
-    elif touched_dates:
-        refresh_latest_rows(touched_dates)
+    # Skip batch-level rebuilding on bootstrap; single rebuild will run at the end (M-9)
+    if not bootstrap:
+        if touched_dates:
+            refresh_latest_rows(touched_dates)
     return {
         "rows": len(history),
         "actions": len(action_records),
@@ -223,11 +223,20 @@ def check_market_availability(last_dates, refetch_last=False):
     if not last_dates:
         return True, None
 
-    # Use RELIANCE as the canary symbol
-    canary_sym = "RELIANCE"
-    if canary_sym not in last_dates:
-        # If RELIANCE isn't there, just pick the first one
-        canary_sym = next(iter(last_dates))
+    if len(last_dates) < 10:
+        # Skip canary check for small subsets to avoid false negatives (M-4)
+        return True, None
+
+    # Use a priority list of liquid benchmark symbols for canary check (M-4)
+    canary_sym = None
+    for sym in ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"]:
+        if sym in last_dates:
+            canary_sym = sym
+            break
+
+    if not canary_sym:
+        # Fallback to skipping canary check if no major benchmark stock is present
+        return True, None
 
     last_stored = last_dates[canary_sym]
     yahoo_sym = f"{canary_sym}{YAHOO_SUFFIX}"
@@ -272,6 +281,14 @@ def run_eod_download(
             "total_actions": 0,
             "failures": [],
         }
+
+    # Sort symbols by last date to group similar start dates together (M-3)
+    def get_sort_key(sym):
+        val = last_dates.get(sym)
+        return val if val else "1970-01-01"
+    
+    symbols["_sort_key"] = symbols["symbol"].apply(get_sort_key)
+    symbols = symbols.sort_values("_sort_key").drop(columns=["_sort_key"])
 
     # Optimization: Canary Check
     if not bootstrap:
