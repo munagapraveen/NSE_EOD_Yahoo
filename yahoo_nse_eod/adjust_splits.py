@@ -451,29 +451,36 @@ def preserve_existing_market_cap(adjusted_df, existing_df):
     return work
 
 
-def rebuild_symbols(symbols, preserve_market_cap=False):
+def rebuild_symbols(symbols, preserve_market_cap=False, conn=None):
     if not symbols:
         log.warning("No symbols to adjust.")
         return
 
+    if conn is None:
+        with get_connection() as shared_conn:
+            _rebuild_symbols_loop(shared_conn, symbols, preserve_market_cap)
+    else:
+        _rebuild_symbols_loop(conn, symbols, preserve_market_cap)
+
+
+def _rebuild_symbols_loop(conn, symbols, preserve_market_cap):
     for idx, symbol in enumerate(symbols, start=1):
-        with get_connection() as conn:
-            with conn:  # Transaction starts here
-                raw = load_raw_prices(conn, symbol)
-                actions = load_corporate_actions(conn, symbol)
-                adjusted = build_split_adjusted(raw, actions=actions)
-                if preserve_market_cap:
-                    shares = load_share_history(conn, symbol)
-                    adjusted = attach_market_cap(adjusted, shares)
-                    existing_market_caps = load_adjusted_market_caps(conn, symbol)
-                    adjusted = preserve_existing_market_cap(adjusted, existing_market_caps)
-                else:
-                    shares = load_share_history(conn, symbol)
-                    adjusted = attach_market_cap(adjusted, shares)
-                
-                replace_adjusted_prices(conn, symbol, adjusted)
-                save_indicators(conn, adjusted)
-                save_market_caps(conn, adjusted)
+        with conn:  # Transaction starts here
+            raw = load_raw_prices(conn, symbol)
+            actions = load_corporate_actions(conn, symbol)
+            adjusted = build_split_adjusted(raw, actions=actions)
+            if preserve_market_cap:
+                shares = load_share_history(conn, symbol)
+                adjusted = attach_market_cap(adjusted, shares)
+                existing_market_caps = load_adjusted_market_caps(conn, symbol)
+                adjusted = preserve_existing_market_cap(adjusted, existing_market_caps)
+            else:
+                shares = load_share_history(conn, symbol)
+                adjusted = attach_market_cap(adjusted, shares)
+            
+            replace_adjusted_prices(conn, symbol, adjusted)
+            save_indicators(conn, adjusted)
+            save_market_caps(conn, adjusted)
         log.info(
             f"[{idx}/{len(symbols)}] rebuilt split-adjusted history, market cap, and moving averages for {symbol}"
         )

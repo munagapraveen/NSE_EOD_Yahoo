@@ -39,7 +39,8 @@ def build_isin_suggestions(db_df, latest_df):
 
 
 def main():
-    apply_changes = "--apply" in sys.argv[1:]
+    apply_direct = "--apply" in sys.argv[1:]
+    apply_isin = "--apply-isin" in sys.argv[1:]
 
     with get_connection() as conn:
         setup_schema(conn)
@@ -77,19 +78,27 @@ def main():
 
     with get_connection() as conn:
         upsert_symbol_aliases(conn, records)
-        if apply_changes:
+        if apply_direct or apply_isin:
             for record in records:
-                apply_symbol_rename(
-                    conn,
-                    record["old_symbol"],
-                    record["new_symbol"],
-                    effective_date=record["effective_date"],
-                    source=record["source"],
-                    note=record["note"],
-                )
-            log.info("Applied symbol changes to DB tables.")
+                should_apply = False
+                if record["source"] == "nse-symbol-changes" and apply_direct:
+                    should_apply = True
+                elif record["source"] == "nse-isin-match" and apply_isin:
+                    should_apply = True
+
+                if should_apply:
+                    apply_symbol_rename(
+                        conn,
+                        record["old_symbol"],
+                        record["new_symbol"],
+                        effective_date=record["effective_date"],
+                        source=record["source"],
+                        note=record["note"],
+                    )
+                    log.info(f"Applied symbol change: {record['old_symbol']} -> {record['new_symbol']} ({record['source']})")
+            log.info("Completed applying selected symbol changes.")
         else:
-            log.info("Dry run only. Re-run with --apply to rename stored history.")
+            log.info("Dry run only. Re-run with --apply to rename direct changes and/or --apply-isin to rename ISIN matches.")
 
 
 if __name__ == "__main__":

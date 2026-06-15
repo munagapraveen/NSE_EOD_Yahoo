@@ -1,7 +1,7 @@
 """Yahoo Finance download helpers."""
 
 from datetime import datetime, timedelta
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_HALF_UP
 
 import pandas as pd
 import yfinance as yf
@@ -13,10 +13,10 @@ PRICE_COLUMNS = ["open", "high", "low", "close", "adj_close"]
 
 
 def truncate_to_2dp(value):
-    """Truncate numeric values to 2 decimal places without rounding up."""
+    """Round numeric values to 2 decimal places using ROUND_HALF_UP."""
     if pd.isna(value):
         return value
-    return float(Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_DOWN))
+    return float(Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
 def normalize_yahoo_history(history, tickers):
@@ -58,8 +58,8 @@ def normalize_yahoo_history(history, tickers):
     }
     result = result.rename(columns=rename)
     result["date"] = pd.to_datetime(result["date"]).dt.strftime("%Y-%m-%d")
-    result["dividends"] = result.get("dividends", 0).fillna(0.0)
-    result["stock_splits"] = result.get("stock_splits", 0).fillna(0.0)
+    result["dividends"] = result["dividends"].fillna(0.0) if "dividends" in result.columns else 0.0
+    result["stock_splits"] = result["stock_splits"].fillna(0.0) if "stock_splits" in result.columns else 0.0
     for col in PRICE_COLUMNS:
         if col in result.columns:
             result[col] = pd.to_numeric(result[col], errors="coerce").apply(truncate_to_2dp)
@@ -96,4 +96,4 @@ def download_history_batch(symbol_df, start=None, end=None):
             "symbol", "date", "open", "high", "low", "close",
             "adj_close", "volume", "dividends", "stock_splits", "source",
         ]
-    ].dropna(subset=["symbol"])
+    ].dropna(subset=["symbol", "close"])

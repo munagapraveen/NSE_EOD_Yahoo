@@ -146,7 +146,9 @@ def _fetch_csv_from_page(page_url, label_pattern, max_retries=3, **kwargs):
                 import time
                 time.sleep(2)
     
-    raise last_err
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError("No retry attempts made")
 
 
 def fetch_securities_master():
@@ -276,7 +278,7 @@ def fetch_symbol_changes():
     def parse_dt(val):
         try:
             return datetime.strptime(str(val).strip(), "%d-%b-%Y").strftime("%Y-%m-%d")
-        except:
+        except Exception:
             return None
 
     df["effective_date"] = df["effective_date"].apply(parse_dt)

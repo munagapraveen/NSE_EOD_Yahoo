@@ -404,7 +404,7 @@ def run_screener(
 
     t_start = time.time()
     # Ensure we load enough days for 12 months + buffer for "next available date"
-    days_to_load = DAYS_TO_LOAD 
+    days_to_load = max(DAYS_TO_LOAD, long_months * 32) 
 
     log.info("")
     log.info("=" * 60)
@@ -661,7 +661,8 @@ def apply_filtered_workbook(df):
 
 
 def export_to_excel(result, latest_date, prices_df):
-    base = Path(__file__).parent
+    base = Path(__file__).parent / "reports"
+    base.mkdir(exist_ok=True, parents=True)
     filename = f"{latest_date}.xlsx"
     out_path = base / filename
     long_months = int(result.attrs.get("long_months", 6))
@@ -801,28 +802,34 @@ def main():
     long_months = 6
     short_months = 3
 
-    for i, arg in enumerate(args):
+    i = 0
+    while i < len(args):
+        arg = args[i]
         if arg == "--mcap" and i + 1 < len(args):
             try:
                 mcap_filter = int(args[i + 1])
             except ValueError:
                 pass
-        if arg == "--top" and i + 1 < len(args):
+            i += 2
+        elif arg == "--top" and i + 1 < len(args):
             try:
                 top_n = int(args[i + 1])
             except ValueError:
                 pass
-        if arg == "--rf" and i + 1 < len(args):
+            i += 2
+        elif arg == "--rf" and i + 1 < len(args):
             try:
                 roc_filter = float(args[i + 1])
             except ValueError:
                 pass
-        if arg == "--turnover" and i + 1 < len(args):
+            i += 2
+        elif arg == "--turnover" and i + 1 < len(args):
             try:
                 turnover_filter = float(args[i + 1])
             except ValueError:
                 pass
-        if arg == "--date" and i + 1 < len(args):
+            i += 2
+        elif arg == "--date" and i + 1 < len(args):
             raw = args[i + 1].strip()
             try:
                 datetime.strptime(raw, "%Y-%m-%d")
@@ -830,16 +837,21 @@ def main():
             except ValueError:
                 print(f"Invalid --date format: '{raw}'. Use YYYY-MM-DD.")
                 return
-        if arg == "--long-months" and i + 1 < len(args):
+            i += 2
+        elif arg == "--long-months" and i + 1 < len(args):
             try:
                 long_months = int(args[i + 1])
             except ValueError:
                 pass
-        if arg == "--short-months" and i + 1 < len(args):
+            i += 2
+        elif arg == "--short-months" and i + 1 < len(args):
             try:
                 short_months = int(args[i + 1])
             except ValueError:
                 pass
+            i += 2
+        else:
+            i += 1
 
     if long_months <= 0 or short_months <= 0:
         print("Invalid Sharpe month values. Use positive integers.")

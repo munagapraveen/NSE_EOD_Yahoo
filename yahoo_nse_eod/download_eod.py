@@ -15,12 +15,12 @@ from db import (
     get_symbol_last_dates,
     insert_raw_prices,
     setup_schema,
-    upsert_corporate_actions,
 )
 from logger import get_logger
 from yahoo_client import download_history_batch
 from sync_symbols import run_sync
 from sync_share_counts import run_share_download
+from sync_corporate_actions import run_corporate_sync
 
 log = get_logger(__name__)
 
@@ -75,12 +75,6 @@ def load_target_symbols(limit=None, only_symbols=None):
     return symbols, last_dates
 
 
-def build_action_records(df):
-    """
-    Yahoo corporate actions (splits/dividends) are now ignored.
-    We rely solely on verified data from NSE synced via sync_corporate_actions.py.
-    """
-    return []
 
 
 def collect_touched_dates(history):
@@ -105,19 +99,17 @@ def identify_missing_symbols(batch, history):
 
 
 def persist_history(history, bootstrap):
-    action_records = build_action_records(history)
+    # Yahoo corporate actions are ignored. Verified actions are synced from NSE.
     touched_symbols, touched_dates = collect_touched_dates(history)
     with get_connection() as conn:
         insert_raw_prices(conn, history)
-        if action_records:
-            upsert_corporate_actions(conn, action_records)
     # Skip batch-level rebuilding on bootstrap; single rebuild will run at the end (M-9)
     if not bootstrap:
         if touched_dates:
             refresh_latest_rows(touched_dates)
     return {
         "rows": len(history),
-        "actions": len(action_records),
+        "actions": 0,
         "touched_symbols": touched_symbols,
         "touched_dates": touched_dates,
     }
@@ -398,6 +390,14 @@ def main():
     if options["bootstrap"]:
         log.info("Bootstrap complete: Automatically downloading historical share counts...")
         run_share_download(symbols)
+
+        log.info("Downloading corporate actions from NSE before final rebuild...")
+        try:
+            dt_parts = DEFAULT_HISTORY_START.split("-")
+            nse_start_date = f"{dt_parts[2]}-{dt_parts[1]}-{dt_parts[0]}"
+            run_corporate_sync(start_date=nse_start_date, rebuild=False)
+        except Exception as e:
+            log.warning(f"Could not sync corporate actions during bootstrap: {e}")
 
         log.info("Share download complete: Performing final rebuild of all symbols to calculate market cap...")
         rebuild_symbols(symbols["symbol"].tolist())

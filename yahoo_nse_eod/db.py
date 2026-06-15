@@ -37,6 +37,10 @@ def get_connection(db_file=DB_FILE):
     conn.execute("PRAGMA synchronous=NORMAL")
     try:
         yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -216,6 +220,7 @@ def setup_schema(conn):
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_indicators_symbol_date ON indicators(symbol, date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_indicators_date ON indicators(date)")
+        conn.commit()
         return
 
     conn.commit()
@@ -258,24 +263,27 @@ def mark_missing_symbols_inactive(conn, active_symbols):
         return
 
     # Create temporary table for comparison
-    conn.execute("CREATE TEMP TABLE temp_active_symbols (symbol TEXT PRIMARY KEY)")
-    conn.executemany(
-        "INSERT INTO temp_active_symbols (symbol) VALUES (?)",
-        [(s,) for s in active_symbols]
-    )
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS temp_active_symbols (symbol TEXT PRIMARY KEY)")
+    conn.execute("DELETE FROM temp_active_symbols")
+    try:
+        conn.executemany(
+            "INSERT INTO temp_active_symbols (symbol) VALUES (?)",
+            [(s,) for s in active_symbols]
+        )
 
-    conn.execute(
-        """
-        UPDATE symbols
-        SET active = 0,
-            status = CASE
-                WHEN status = 'renamed' THEN status
-                ELSE 'inactive'
-            END
-        WHERE symbol NOT IN (SELECT symbol FROM temp_active_symbols)
-        """
-    )
-    conn.execute("DROP TABLE temp_active_symbols")
+        conn.execute(
+            """
+            UPDATE symbols
+            SET active = 0,
+                status = CASE
+                    WHEN status = 'renamed' THEN status
+                    ELSE 'inactive'
+                END
+            WHERE symbol NOT IN (SELECT symbol FROM temp_active_symbols)
+            """
+        )
+    finally:
+        conn.execute("DROP TABLE IF EXISTS temp_active_symbols")
     conn.commit()
 
 
@@ -448,8 +456,9 @@ def save_indicators(conn, df):
     if df.empty:
         return
     
-    # Identify available indicator columns (ma_*)
-    indicator_cols = [c for c in df.columns if c.startswith("ma_")]
+    # Identify available indicator columns (ma_*) and sanitize against allowed names
+    valid_cols = set(get_indicator_cols())
+    indicator_cols = [c for c in df.columns if c in valid_cols]
     cols = ["symbol", "date"] + indicator_cols
     
     data = [
@@ -485,12 +494,13 @@ def load_indicators(conn, symbol, indicator_names=None):
     Returns wide format by default now.
     """
     cols = ["date"]
+    valid_cols = set(get_indicator_cols())
     if indicator_names:
-        cols.extend(indicator_names)
+        cols.extend([c for c in indicator_names if c in valid_cols])
     else:
         # Load all ma_* columns
         info = conn.execute("PRAGMA table_info(indicators)").fetchall()
-        cols.extend([row[1] for row in info if row[1].startswith("ma_")])
+        cols.extend([row[1] for row in info if row[1] in valid_cols])
         
     col_str = ",".join(cols)
     query = f"SELECT {col_str} FROM indicators WHERE symbol = ? ORDER BY date"

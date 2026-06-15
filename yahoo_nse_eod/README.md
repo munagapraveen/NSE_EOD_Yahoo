@@ -38,7 +38,7 @@ UI can be added later.
 - [sharpe_screener.py](D:/Praveen/Codex/NSED/yahoo_nse_eod/sharpe_screener.py)
 - [query_prices.py](D:/Praveen/Codex/NSED/yahoo_nse_eod/query_prices.py)
 - [symbol_change_handler.py](D:/Praveen/Codex/NSED/yahoo_nse_eod/symbol_change_handler.py)
-- [gui.py](D:/Praveen/Codex/NSED/yahoo_nse_eod/gui.py)
+- [gui_y.py](D:/Praveen/Codex/NSED/yahoo_nse_eod/gui_y.py)
 
 ## Database
 
@@ -135,7 +135,7 @@ python sharpe_screener.py --date 2025-12-31 --long-months 6 --short-months 3
 11. Launch the PySide6 GUI
 
 ```powershell
-python gui.py
+python gui_y.py
 ```
 
 ## Notes

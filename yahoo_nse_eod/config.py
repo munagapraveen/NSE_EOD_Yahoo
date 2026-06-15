@@ -6,8 +6,11 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 LOG_DIR = BASE_DIR / "logs"
 
-DATA_DIR.mkdir(exist_ok=True)
-LOG_DIR.mkdir(exist_ok=True)
+def initialize_config():
+    """Create data and log directories if they do not exist."""
+    DATA_DIR.mkdir(exist_ok=True)
+    LOG_DIR.mkdir(exist_ok=True)
+
 
 DB_FILE = DATA_DIR / "yahoo_nse_eod.db"
 LOG_FILE = LOG_DIR / "yahoo_nse_eod.log"
@@ -69,9 +72,8 @@ INDEX_MAP = {
 
 DEFAULT_BATCH_SIZE = 75
 DEFAULT_LOOKBACK_DAYS = 7
-DEFAULT_HISTORY_START = "2024-01-01"
+DEFAULT_HISTORY_START = "2020-01-01"
 
-NSE_REPORTS_URL = "https://www.nseindia.com/static/market-data/securities-available-for-trading"
 NSE_SYMBOL_PAGE_URL = "https://www.nseindia.com/static/market-data/securities-available-for-trading"
 NSE_CORP_ACTIONS_URL = "https://www.nseindia.com/api/corporates-corporateactions?index=equities"
 

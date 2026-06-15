@@ -51,7 +51,12 @@ def parse_args(args):
             i += 2
             continue
         if arg == "--limit" and i + 1 < len(args):
-            options["limit"] = max(1, int(args[i + 1]))
+            try:
+                options["limit"] = max(1, int(args[i + 1]))
+            except ValueError:
+                print(f"Error: --limit requires an integer, got '{args[i+1]}'", flush=True)
+                sys.exit(1)
+                return
             i += 2
             continue
         if arg == "--csv" and i + 1 < len(args):
@@ -73,6 +78,10 @@ def parse_args(args):
             i += 1
             continue
         i += 1
+
+    if options["latest_only"] and (options["from_date"] or options["to_date"]):
+        print("Error: --latest cannot be combined with date filters (--from / --to)", flush=True)
+        sys.exit(1)
 
     return options
 
@@ -137,9 +146,14 @@ def main():
     options = parse_args(sys.argv[1:])
     query, params = build_query(options)
 
-    with get_connection() as conn:
-        setup_schema(conn)
-        df = pd.read_sql(query, conn, params=params)
+    try:
+        with get_connection() as conn:
+            setup_schema(conn)
+            df = pd.read_sql(query, conn, params=params)
+    except Exception as e:
+        print(f"Error: {e}", flush=True)
+        sys.exit(1)
+        return
 
     if df.empty:
         print("No rows found.")
